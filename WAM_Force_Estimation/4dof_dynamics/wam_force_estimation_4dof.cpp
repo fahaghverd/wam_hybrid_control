@@ -30,6 +30,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <ros/ros.h>
+#include <wam_msgs/RTCartForce.msg>
+
 class ExtendedRamp : public systems::Ramp {
 public:
     using Ramp::Ramp;  // Inherit constructors from Ramp
@@ -74,6 +77,10 @@ template<size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
 
+	ros::init(argc, argv, "force_estimator_node");
+    ros::NodeHandle nh;
+	ros::Publisher force_publisher = nh.advertise<wam_msgs::RTCartForce>("force_topic", 10);
+
 	char tmpFile[] = "/tmp/btXXXXXX";
 	if (mkstemp(tmpFile) == -1) {
 		printf("ERROR: Couldn't create temporary file!\n");
@@ -95,9 +102,11 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	int mode = 5;  
 
 	// Load configuration settings
+	
 	libconfig::Config config;
 	config.readFile("inverse_dynamics_test.conf");
-	const libconfig::Setting& setting = config.lookup(pm.getWamDefaultConfigPath());
+	
+	libconfig::Setting& setting = pm.getConfig().lookup(pm.getWamDefaultConfigPath());
 	
 	//Instantiating systems
 	GravityCompensator<DOF> gravityTerm(setting["gravity_compensation"]);
@@ -173,9 +182,10 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	bool inputReceived = false;
     std::string lineInput2;
     std::cout << "Press [Enter] to stop." << std::endl;
-
+	int i =0;
+	cf_type cf;	
+	wam_msgs::RTCartForce force_msg;
 	while (pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE && !inputReceived){
-
 		char c;
         if (read(STDIN_FILENO, &c, 1) > 0) {
             if (c == '\n') {
@@ -183,19 +193,11 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
                 break;
             }
         }
-			btsleep(0.2);
+		std::cout << "Estimated F:" << forceEstimator.computedF << std::endl;}
 
-			{//std::cout << "Timestamp:" << time.getYValue() << std::endl;
-			 std::cout << "Estimated Ja:" << forceEstimator.Jacobian.getValue() << std::endl;
-			 std::cout << "Estimated Ja:" << forceEstimator.jacobianPseudoInverse << std::endl;
-			 //std::cout << "Estimated rotor:" << forceEstimator.rotorInertiaEffect.getValue() << std::endl;
-			 std::cout << "Estimated F:" << forceEstimator.computedF << std::endl;
-			 std::cout << "Joint Torques:" << wam.getJointTorques() << std::endl;
-			 std::cout << "Est Torques:" << forceEstimator.jt << std::endl;
-			 }
-
-
-	
+		force_msg.force_data = forceEstimator.computedF;
+		force_publisher.publish(force_msg);		 
+			
 	}
 
 	// Restore terminal settings
