@@ -1,3 +1,0 @@
-/home/wam/libbarrett/src/Libbarrett_Computed_Torque_Controller/build/CMakeFiles/rebuild_cache.dir
-/home/wam/libbarrett/src/Libbarrett_Computed_Torque_Controller/build/CMakeFiles/edit_cache.dir
-/home/wam/libbarrett/src/Libbarrett_Computed_Torque_Controller/build/CMakeFiles/wam_joint_space_ID_controller_4dof.dir
