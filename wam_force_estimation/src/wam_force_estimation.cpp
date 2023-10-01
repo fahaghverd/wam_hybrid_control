@@ -97,7 +97,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	// Load configuration settings
 	libconfig::Config config;
 	config.readFile("inverse_dynamics_test.conf");
-
+	
 	//Instantiating systems
 	typedef boost::tuple<double, cf_type, ct_type> tuple_type;
 	const LowLevelWam<DOF>& llw = wam.getLowLevelWam();

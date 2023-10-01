@@ -13,6 +13,8 @@
 #include <Dynamics.hpp>
 #include <differentiator.hpp>
 #include <force_estimator_4dof.hpp>
+#include <extended_ramp.hpp>
+#include <get_jacobian_system.hpp>
 #include <unistd.h>
 #include <iostream>
 #include <string>
@@ -33,54 +35,19 @@
 #include <ros/ros.h>
 #include <wam_force_estimation/RTCartForce.h>
 
-class ExtendedRamp : public systems::Ramp {
-public:
-    using Ramp::Ramp;  // Inherit constructors from Ramp
-	
-    double getYValue() const {
-        return y;
-    }
-};
-
-template<size_t DOF>
-class getJacobian : public System, public systems::SingleOutput<math::Matrix<6,DOF>>,
-					public systems::KinematicsInput<DOF>
-{
-	BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
-
-public:
-	getJacobian(const std::string& sysName = "getJacobian"): System(sysName), SingleOutput<math::Matrix<6,DOF>>(this), KinematicsInput<DOF>(this) {}
-	virtual ~getJacobian() {this->mandatoryCleanUp(); }
-
-protected:
-	math::Matrix<6,DOF> Jacobian;
-	gsl_matrix * j;
-	virtual void operate() {
-		j = this->kinInput.getValue().impl->tool_jacobian;
-		// Convert GSL matrix to Eigen matrix
-		for (size_t row = 0; row < 6; ++row) {
-			for (size_t col = 0; col < DOF; ++col) {
-				// Access the element in the GSL matrix and copy it to the math::Matrix
-				double value = gsl_matrix_get(j, row, col);
-				Jacobian(row, col) = value;
-			}
-		}
-		this->outputValue->setData(&Jacobian);
-	}
-private:
-	DISALLOW_COPY_AND_ASSIGN(getJacobian);
-
-};
-
-
 template<size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
 
 	ros::init(argc, argv, "force_estimator_node");
     ros::NodeHandle nh;
-	ros::Publisher force_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_topic", 10);
-	ros::Publisher force_avg_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_avg_topic", 10);
+
+	//Setting up real-time command timeouts and initial values
+	ros::Duration rt_msg_timeout;
+    rt_msg_timeout.fromSec(0.2); //rt_status will be determined false if rt message is not received in specified time
+	
+	ros::Publisher force_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_topic", 1);
+	ros::Publisher force_avg_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_avg_topic", 1);
 
 	char tmpFile[] = "/tmp/btXXXXXX";
 	if (mkstemp(tmpFile) == -1) {
@@ -88,40 +55,41 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 		return 1;
 	}
 	
-	// Define the start pose for the robot
+	//Moving to start pose
 	jp_type start_pose;
 	start_pose<< 0.5, 0.5, 1, 2.0;
-
-	//Moving to start pose
-	wam.moveTo(start_pose);
+	//wam.moveTo(start_pose);
 
 	//Adding gravity term and unholding joints
 	wam.gravityCompensate();
 	usleep(1500);
 
 	// Set the differentiator mode indicating how many data points it uses
-	int mode = 5;  
+	//int mode = 5;  
 
 	// Load configuration settings
-	
-	libconfig::Config config;
-	config.readFile("inverse_dynamics_test.conf");
-	
+	//libconfig::Config config;
+	//config.readFile("inverse_dynamics_test.conf");		
+	v_type drive_inertias;
+	drive_inertias[0] = 11631e-8;
+	drive_inertias[1] = 11831e-8;
+	drive_inertias[2] = 11831e-8;
+	drive_inertias[3] = 10686e-8; 
 	libconfig::Setting& setting = pm.getConfig().lookup(pm.getWamDefaultConfigPath());
-	
+	ja_type zero_acc;
+
 	//Instantiating systems
-	GravityCompensator<DOF> gravityTerm(setting["gravity_compensation"]);
-	typedef boost::tuple<double, cf_type> tuple_type;
-	//ForceEstimator<DOF> forceEstimator(false);
+	typedef boost::tuple<cf_type> tuple_type;
+	systems::GravityCompensator<DOF> gravityTerm(setting["gravity_compensation"]);
 	getJacobian<DOF> getWAMJacobian;
-	ForceEstimator<DOF> forceEstimator(true);
+	ForceEstimator<DOF> forceEstimator(false);
 	Dynamics<DOF> wam4dofDynamics;
-	differentiator<DOF, jv_type, ja_type> diff(mode);
-	ExtendedRamp time(pm.getExecutionManager(), 1.0);
+	systems::Constant<ja_type> zero(zero_acc);
+	//differentiator<DOF, jv_type, ja_type> diff(mode);
+	//ExtendedRamp time(pm.getExecutionManager(), 1.0);
 	const LowLevelWam<DOF>& llw = wam.getLowLevelWam();
-	systems::Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * v_type(config.lookup("drive_inertias")).asDiagonal() * llw.getJointToMotorPositionTransform());
-	systems::TupleGrouper<double, cf_type> tg;
-	//FrictionCompensator<DOF> friction_comp();
+	systems::Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * drive_inertias.asDiagonal() * llw.getJointToMotorPositionTransform());
+	systems::TupleGrouper<cf_type> tg;
 
 	double omega_p = 130.0;
 	systems::FirstOrderFilter<jv_type> hp;
@@ -135,16 +103,18 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 			new log::RealTimeWriter<tuple_type>(tmpFile, PERIOD_MULTIPLIER * pm.getExecutionManager()->getPeriod()),
 			PERIOD_MULTIPLIER);
 
-
+	
 	//Connecting system potrs
-	systems::connect(time.output, diff.time);
-	systems::connect(time.output, tg.template getInput<0>());
+	//systems::connect(time.output, diff.time);
+	//systems::connect(time.output, tg.template getInput<0>());
 
-	//systems::connect(wam.jvOutput, hp.input);
-	//systems::connect(hp.output, changeUnits.input);
-	systems::connect(wam.jvOutput, diff.inputSignal);
-	systems::connect(diff.outputSignal, forceEstimator.jaInput);
-	systems::connect(diff.outputSignal, driveInertias.input);
+	systems::connect(wam.jvOutput, hp.input);
+	systems::connect(hp.output, changeUnits.input);
+	//systems::connect(wam.jvOutput, diff.inputSignal);
+	//systems::connect(diff.outputSignal, forceEstimator.jaInput);
+	//systems::connect(diff.outputSignal, driveInertias.input);
+	systems::connect(zero.output, forceEstimator.jaInput);
+	systems::connect(zero.output, driveInertias.input);
 	//systems::connect(changeUnits.output, forceEstimator.jaInput);
 
 	systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
@@ -161,12 +131,14 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	systems::connect(wam4dofDynamics.MassMAtrixOutput, forceEstimator.M);
 	systems::connect(wam4dofDynamics.CVectorOutput, forceEstimator.C);
 
-	systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<1>());
+	systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<0>());
 	systems::connect(tg.output, logger.input);
 
 	
 	// Reset and start the time counter
-	time.start();
+	/*{BARRETT_SCOPED_LOCK(pm.getExecutionManager()->getMutex());
+	time.reset();
+	time.start();}*/
 	
 	printf("Logging started.\n");
 
@@ -182,23 +154,26 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
     std::string lineInput2;
     std::cout << "Press [Enter] to stop." << std::endl;
 
-	int i =0;
+	ros::Rate pub_rate(500);
+
+	int i = 0;
 	cf_type cf_avg;	
 	wam_force_estimation::RTCartForce force_msg;
 	wam_force_estimation::RTCartForce force_avg_msg;
-	while (pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE && !inputReceived){
+	btsleep(1);
+	while (ros::ok() && pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE){
+		ros::spinOnce();
 		char c;
 		i++;
-
 		cf_avg = cf_avg + forceEstimator.computedF;
-
+		std::cout<< cf_avg << std::endl;
         if (read(STDIN_FILENO, &c, 1) > 0) {
             if (c == '\n') {
                 inputReceived = true;
                 break;
             }
         }
-		//std::cout << "Estimated F:" << forceEstimator.computedF << std::endl;
+		std::cout << "Estimated F:" <<forceEstimator.computedF << std::endl;
 		force_msg.force[0] = forceEstimator.computedF[0];
 		force_msg.force[1] = forceEstimator.computedF[1];
 		force_msg.force[2] = forceEstimator.computedF[2];
@@ -211,21 +186,21 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 			force_avg_msg.force[2] = cf_avg[2];
 			force_avg_publisher.publish(force_avg_msg);
 			i = 0;
-			cf_avg<< 0.0, 0.0, 0.0;
+			cf_avg<< 0.0, 0.0, 0.0, 0.0;
 			}
 		
-		
+		pub_rate.sleep();
 	}
 
 		 
 			
-	// Restore terminal settings
+	//Restore terminal settings
     tcsetattr(STDIN_FILENO, TCSANOW, &oldSettings);
     fcntl(STDIN_FILENO, F_SETFL, 0);
 	
-	// Stop the time counter and disconnect controllers
-	time.stop();
-	wam.idle();
+	//Stop the time counter and disconnect controllers
+	//time.stop();
+	//wam.idle();
 	
 	logger.closeLog();
 	printf("Logging stopped.\n");

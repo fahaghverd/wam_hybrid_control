@@ -63,5 +63,3 @@ target_link_libraries(wam_force_estimation_4dof ${catkin_LIBRARIES} ${BARRETT_LI
 
 add_executable(wam_force_estimation src/wam_force_estimation.cpp)
 target_link_libraries(wam_force_estimation ${catkin_LIBRARIES} ${BARRETT_LIBRARIES})
-
-
