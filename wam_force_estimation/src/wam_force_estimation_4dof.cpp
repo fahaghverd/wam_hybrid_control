@@ -39,16 +39,17 @@ template<size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
 
+	//Initialising ROS node and publishers
 	ros::init(argc, argv, "force_estimator_node");
     ros::NodeHandle nh;
+	ros::Publisher force_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_topic", 1);
+	ros::Publisher force_avg_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_avg_topic", 1);
 
 	//Setting up real-time command timeouts and initial values
 	ros::Duration rt_msg_timeout;
     rt_msg_timeout.fromSec(0.2); //rt_status will be determined false if rt message is not received in specified time
-	
-	ros::Publisher force_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_topic", 1);
-	ros::Publisher force_avg_publisher = nh.advertise<wam_force_estimation::RTCartForce>("force_avg_topic", 1);
 
+	//temp file for logger
 	char tmpFile[] = "/tmp/btXXXXXX";
 	if (mkstemp(tmpFile) == -1) {
 		printf("ERROR: Couldn't create temporary file!\n");
@@ -65,7 +66,8 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	usleep(1500);
 
 	// Set the differentiator mode indicating how many data points it uses
-	//int mode = 5;  
+	//int mode = 5; 
+	ja_type zero_acc; 
 
 	// Load configuration settings
 	//libconfig::Config config;
@@ -76,7 +78,6 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	drive_inertias[2] = 11831e-8;
 	drive_inertias[3] = 10686e-8; 
 	libconfig::Setting& setting = pm.getConfig().lookup(pm.getWamDefaultConfigPath());
-	ja_type zero_acc;
 
 	//Instantiating systems
 	typedef boost::tuple<cf_type> tuple_type;
@@ -91,12 +92,14 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	systems::Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * drive_inertias.asDiagonal() * llw.getJointToMotorPositionTransform());
 	systems::TupleGrouper<cf_type> tg;
 
+	//Firstorder filter instead of diffrentiator
 	double omega_p = 130.0;
 	systems::FirstOrderFilter<jv_type> hp;
 	hp.setHighPass(jv_type(omega_p), jv_type(omega_p));
 	pm.getExecutionManager()->startManaging(hp);
 	systems::Gain<jv_type, double, ja_type> changeUnits(1.0);
 
+	//real-time data logger
 	const size_t PERIOD_MULTIPLIER = 1;
 	systems::PeriodicDataLogger<tuple_type> logger(
 			pm.getExecutionManager(),
@@ -108,8 +111,8 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	//systems::connect(time.output, diff.time);
 	//systems::connect(time.output, tg.template getInput<0>());
 
-	systems::connect(wam.jvOutput, hp.input);
-	systems::connect(hp.output, changeUnits.input);
+	//systems::connect(wam.jvOutput, hp.input);
+	//systems::connect(hp.output, changeUnits.input);
 	//systems::connect(wam.jvOutput, diff.inputSignal);
 	//systems::connect(diff.outputSignal, forceEstimator.jaInput);
 	//systems::connect(diff.outputSignal, driveInertias.input);
@@ -123,7 +126,6 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	systems::connect(getWAMJacobian.output, forceEstimator.Jacobian);
 	systems::connect(driveInertias.output, forceEstimator.rotorInertiaEffect);
 	systems::connect(gravityTerm.output, forceEstimator.g);
-
 	systems::connect(wam.jtSum.output, forceEstimator.jtInput);
 	
 	systems::connect(wam.jpOutput, wam4dofDynamics.jpInputDynamics);
@@ -162,31 +164,35 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	wam_force_estimation::RTCartForce force_avg_msg;
 	btsleep(1);
 	while (ros::ok() && pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE){
+		// Process pending ROS events and execute callbacks
 		ros::spinOnce();
-		char c;
-		i++;
-		cf_avg = cf_avg + forceEstimator.computedF;
-		std::cout<< cf_avg << std::endl;
-        if (read(STDIN_FILENO, &c, 1) > 0) {
+
+		char c;		
+		if (read(STDIN_FILENO, &c, 1) > 0) {
             if (c == '\n') {
                 inputReceived = true;
                 break;
             }
         }
-		std::cout << "Estimated F:" <<forceEstimator.computedF << std::endl;
+		
+		//std::cout<< cf_avg << std::endl;
+
+		i++;
+		cf_avg = cf_avg + forceEstimator.computedF;
+		//std::cout << "Estimated F:" <<forceEstimator.computedF << std::endl;
 		force_msg.force[0] = forceEstimator.computedF[0];
 		force_msg.force[1] = forceEstimator.computedF[1];
 		force_msg.force[2] = forceEstimator.computedF[2];
 		force_publisher.publish(force_msg);
 		
-		if(i == 10){
+		if(i == 20){
 			cf_avg = cf_avg/i;
 			force_avg_msg.force[0] = cf_avg[0];
 			force_avg_msg.force[1] = cf_avg[1];
 			force_avg_msg.force[2] = cf_avg[2];
 			force_avg_publisher.publish(force_avg_msg);
 			i = 0;
-			cf_avg<< 0.0, 0.0, 0.0, 0.0;
+			cf_avg<< 0.0, 0.0, 0.0;
 			}
 		
 		pub_rate.sleep();
@@ -200,7 +206,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	
 	//Stop the time counter and disconnect controllers
 	//time.stop();
-	//wam.idle();
+	wam.idle();
 	
 	logger.closeLog();
 	printf("Logging stopped.\n");
