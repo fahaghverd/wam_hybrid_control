@@ -11,8 +11,7 @@
 #include <Eigen/Dense>
 #include <barrett/units.h>
 #include <barrett/systems.h>
-#include <barrett/math/kinematics.h>
-#include <typeinfo> 
+#include <barrett/math/kinematics.h> 
 
 using namespace barrett;
 

@@ -29,6 +29,8 @@
 using namespace barrett;
 using detail::waitForEnter;
 
+#include <ros/ros.h>
+
 //	systems::PIDController<jp_type, ja_type> pid(config.lookup("control_joint"));
 //	systems::InverseDynamics<DOF> id(pm.getConfig().lookup(pm.getWamDefaultConfigPath())["dynamics"]);
 //	connect(wam.jpOutput, pid.feedbackInput);

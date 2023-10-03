@@ -12,9 +12,6 @@
 #include <barrett/units.h>
 #include <barrett/systems.h>
 
-#include <gsl/gsl_matrix.h>
-#include <gsl/gsl_linalg.h>
-
 using namespace barrett;
 
 template<size_t DOF>
@@ -43,7 +40,7 @@ protected:
 public:
 cf_type computedF;
 ct_type computedT;
-Eigen::MatrixXd J;
+math::Matrix<6,DOF> J;
 
 
 public:
@@ -55,9 +52,7 @@ public:
 
 protected:
 	jt_type jt_wam_sys, jt_comp_sys;
-
-	Eigen::Vector4d cf_out;
-	Eigen::MatrixXd jacobianPseudoInverse;
+	Eigen::VectorXd cf_out;
 
 	virtual void operate() {
 		/*Taking feedback values from the input terminal of this system*/
@@ -66,9 +61,7 @@ protected:
 
 		J = this->Jacobian.getValue();
 
-		jacobianPseudoInverse = J.completeOrthogonalDecomposition().pseudoInverse();
-
-		cf_out = jacobianPseudoInverse.transpose()*(jt_wam_sys - jt_comp_sys);
+		cf_out = J.transpose().colPivHouseholderQr().solve(jt_wam_sys - jt_comp_sys);
 		
 		computedF = cf_out.segment(0,3);
 		computedT = cf_out.segment(3,6);

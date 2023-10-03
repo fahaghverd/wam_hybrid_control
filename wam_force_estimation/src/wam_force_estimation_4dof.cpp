@@ -113,13 +113,15 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 
 	//systems::connect(wam.jvOutput, hp.input);
 	//systems::connect(hp.output, changeUnits.input);
+	//systems::connect(changeUnits.output, forceEstimator.jaInput);
+	//systems::connect(changeUnits.output, driveInertias.input);	
+
 	//systems::connect(wam.jvOutput, diff.inputSignal);
 	//systems::connect(diff.outputSignal, forceEstimator.jaInput);
 	//systems::connect(diff.outputSignal, driveInertias.input);
-	//systems::connect(zero.output, forceEstimator.jaInput);
-	//systems::connect(zero.output, driveInertias.input);
-	systems::connect(changeUnits.output, forceEstimator.jaInput);
-	systems::connect(changeUnits.output, driveInertias.input);
+
+	systems::connect(zero.output, forceEstimator.jaInput);
+	systems::connect(zero.output, driveInertias.input);
 
 	systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
 	systems::connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
