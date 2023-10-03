@@ -58,15 +58,15 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	
 	//Moving to start pose
 	jp_type start_pose;
-	start_pose<< 0.5, 0.5, 1, 2.0;
-	//wam.moveTo(start_pose);
+	start_pose<< 0.0,1.0,0.0, 2.0;
+	wam.moveTo(start_pose);
 
 	//Adding gravity term and unholding joints
 	wam.gravityCompensate();
 	usleep(1500);
 
 	// Set the differentiator mode indicating how many data points it uses
-	//int mode = 5; 
+	int mode = 5; 
 	ja_type zero_acc; 
 
 	// Load configuration settings
@@ -80,17 +80,17 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	libconfig::Setting& setting = pm.getConfig().lookup(pm.getWamDefaultConfigPath());
 
 	//Instantiating systems
-	typedef boost::tuple<cf_type> tuple_type;
+	typedef boost::tuple<double, cf_type> tuple_type;
 	systems::GravityCompensator<DOF> gravityTerm(setting["gravity_compensation"]);
 	getJacobian<DOF> getWAMJacobian;
-	ForceEstimator<DOF> forceEstimator(false);
+	ForceEstimator<DOF> forceEstimator(true);
 	Dynamics<DOF> wam4dofDynamics;
 	systems::Constant<ja_type> zero(zero_acc);
-	//differentiator<DOF, jv_type, ja_type> diff(mode);
-	//ExtendedRamp time(pm.getExecutionManager(), 1.0);
+	differentiator<DOF, jv_type, ja_type> diff(mode);
+	ExtendedRamp time(pm.getExecutionManager(), 1.0);
 	const LowLevelWam<DOF>& llw = wam.getLowLevelWam();
 	systems::Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * drive_inertias.asDiagonal() * llw.getJointToMotorPositionTransform());
-	systems::TupleGrouper<cf_type> tg;
+	systems::TupleGrouper<double, cf_type> tg;
 
 	//Firstorder filter instead of diffrentiator
 	double omega_p = 130.0;
@@ -108,17 +108,18 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 
 	
 	//Connecting system potrs
-	//systems::connect(time.output, diff.time);
-	//systems::connect(time.output, tg.template getInput<0>());
+	systems::connect(time.output, diff.time);
+	systems::connect(time.output, tg.template getInput<0>());
 
 	//systems::connect(wam.jvOutput, hp.input);
 	//systems::connect(hp.output, changeUnits.input);
 	//systems::connect(wam.jvOutput, diff.inputSignal);
 	//systems::connect(diff.outputSignal, forceEstimator.jaInput);
 	//systems::connect(diff.outputSignal, driveInertias.input);
-	systems::connect(zero.output, forceEstimator.jaInput);
-	systems::connect(zero.output, driveInertias.input);
-	//systems::connect(changeUnits.output, forceEstimator.jaInput);
+	//systems::connect(zero.output, forceEstimator.jaInput);
+	//systems::connect(zero.output, driveInertias.input);
+	systems::connect(changeUnits.output, forceEstimator.jaInput);
+	systems::connect(changeUnits.output, driveInertias.input);
 
 	systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
 	systems::connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
@@ -133,14 +134,14 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	systems::connect(wam4dofDynamics.MassMAtrixOutput, forceEstimator.M);
 	systems::connect(wam4dofDynamics.CVectorOutput, forceEstimator.C);
 
-	systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<0>());
+	systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<1>());
 	systems::connect(tg.output, logger.input);
 
 	
 	// Reset and start the time counter
-	/*{BARRETT_SCOPED_LOCK(pm.getExecutionManager()->getMutex());
+	{BARRETT_SCOPED_LOCK(pm.getExecutionManager()->getMutex());
 	time.reset();
-	time.start();}*/
+	time.start();}
 	
 	printf("Logging started.\n");
 
@@ -183,6 +184,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 		force_msg.force[0] = forceEstimator.computedF[0];
 		force_msg.force[1] = forceEstimator.computedF[1];
 		force_msg.force[2] = forceEstimator.computedF[2];
+		force_msg.time = time.getYValue();
 		force_publisher.publish(force_msg);
 		
 		if(i == 20){
@@ -190,6 +192,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 			force_avg_msg.force[0] = cf_avg[0];
 			force_avg_msg.force[1] = cf_avg[1];
 			force_avg_msg.force[2] = cf_avg[2];
+			force_avg_msg.time= time.getYValue();
 			force_avg_publisher.publish(force_avg_msg);
 			i = 0;
 			cf_avg<< 0.0, 0.0, 0.0;
@@ -205,7 +208,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
     fcntl(STDIN_FILENO, F_SETFL, 0);
 	
 	//Stop the time counter and disconnect controllers
-	//time.stop();
+	time.stop();
 	wam.idle();
 	
 	logger.closeLog();

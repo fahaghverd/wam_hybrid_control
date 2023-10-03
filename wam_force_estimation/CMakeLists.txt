@@ -44,6 +44,8 @@ add_message_files(
 generate_messages(
   DEPENDENCIES
   std_msgs
+  geometry_msgs
+  wam_force_estimation
 )
 
 catkin_package(

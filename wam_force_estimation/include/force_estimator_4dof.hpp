@@ -12,6 +12,7 @@
 #include <barrett/units.h>
 #include <barrett/systems.h>
 #include <barrett/math/kinematics.h>
+#include <typeinfo> 
 
 using namespace barrett;
 
@@ -53,12 +54,11 @@ ct_type computedT;
 public:
 	explicit ForceEstimator(bool driveInertias = false, const std::string& sysName = "ForceEstimator"):
 		System(sysName), jaInput(this), M(this), C(this), jtInput(this), Jacobian(this), rotorInertiaEffect(this), g(this), driveInertias(driveInertias),
-		 cartesianForceOutput(this, &cartesianForceOutputValue), cartesianTorqueOutput(this, &cartesianTorqueOutputValue){tmp_jaco_lin = Eigen::MatrixXd(3, 4);
-		 tmp_jaco_ang = Eigen::MatrixXd(3, 4);
-		 jt = Eigen::MatrixXd(4, 1);
-		 estimatedF = Eigen::MatrixXd(3, 1);
-		 estimatedT = Eigen::MatrixXd(3, 1);
-		 }
+		 cartesianForceOutput(this, &cartesianForceOutputValue), cartesianTorqueOutput(this, &cartesianTorqueOutputValue){
+			tmp_jaco_lin = Eigen::MatrixXd(3, 4);
+			tmp_jaco_ang = Eigen::MatrixXd(3, 4);
+			jt = Eigen::VectorXd(4, 1);
+		}
 
 	virtual ~ForceEstimator() { this->mandatoryCleanUp(); }
 
@@ -68,7 +68,6 @@ protected:
 	Eigen::Vector4d C_inside;
 	Eigen::Matrix4d M_inside;
 	math::Matrix<6,DOF> J;
-	//Eigen::MatrixXd J;
 
 	ja_type ja_sys;
 	jt_type jt_sys, jt_drive, G;
@@ -77,7 +76,6 @@ protected:
 	Eigen::Vector4d tmp_a, tmp_jt, tmp_jt_inertia, tmp_g;
 	Eigen::VectorXd jt;
 	Eigen::VectorXd estimatedF, estimatedT;
-	//Eigen::Matrix<double, 6, 1> cf_out;
 
 	virtual void operate() {
 		/*Taking feedback values from the input terminal of this system*/
@@ -105,8 +103,8 @@ protected:
 		tmp_jaco_ang.row(2) << J(5,0), J(5,1), J(5,2), J(5,3);
 
 		//jacobianPseudoInverse = tmp_jaco.completeOrthogonalDecomposition().pseudoInverse();
-		Eigen::HouseholderQR<Eigen::MatrixXd> system(tmp_jaco_lin);
-		Eigen::HouseholderQR<Eigen::MatrixXd> systemg(tmp_jaco_ang);
+		Eigen::ColPivHouseholderQR<Eigen::MatrixXd> system(tmp_jaco_lin.transpose());
+		Eigen::ColPivHouseholderQR<Eigen::MatrixXd> systemg(tmp_jaco_ang.transpose());
 		
 		if (driveInertias){	
 			tmp_jt_inertia << jt_drive[0], jt_drive[1], jt_drive[2], jt_drive[3];
