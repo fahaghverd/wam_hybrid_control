@@ -46,13 +46,16 @@ math::Matrix<6,DOF> J;
 public:
 	explicit ForceEstimator( const std::string& sysName = "ForceEstimator"):
 		System(sysName), Jacobian(this), jtWAMInput(this), jtCompInput(this), cartesianForceOutput(this, &cartesianForceOutputValue),
-		 cartesianTorqueOutput(this, &cartesianTorqueOutputValue){}
+		 cartesianTorqueOutput(this, &cartesianTorqueOutputValue){
+		 jt = Eigen::MatrixXd(DOF, 1);
+		 tmp_jaco = Eigen::MatrixXd(DOF, 6);}
 
 	virtual ~ForceEstimator() { this->mandatoryCleanUp(); }
 
 protected:
 	jt_type jt_wam_sys, jt_comp_sys;
 	Eigen::VectorXd cf_out;
+	Eigen::MatrixXd tmp_jaco, jt;
 
 	virtual void operate() {
 		/*Taking feedback values from the input terminal of this system*/
@@ -60,11 +63,14 @@ protected:
 		jt_comp_sys = this->jtCompInput.getValue();
 
 		J = this->Jacobian.getValue();
+		tmp_jaco = J.transpose();
 
-		cf_out = J.transpose().colPivHouseholderQr().solve(jt_wam_sys - jt_comp_sys);
-		
-		computedF = cf_out.segment(0,3);
-		computedT = cf_out.segment(3,6);
+		jt = jt_wam_sys - jt_comp_sys;
+		Eigen::ColPivHouseholderQR<Eigen::MatrixXd> system(tmp_jaco);
+		cf_out = system.solve(jt);
+
+		computedF << cf_out[0], cf_out[1], cf_out[2];
+		computedT << cf_out[3], cf_out[4], cf_out[5];
 
 		cartesianForceOutputValue->setData(&computedF);
  		cartesianTorqueOutputValue->setData(&computedT);

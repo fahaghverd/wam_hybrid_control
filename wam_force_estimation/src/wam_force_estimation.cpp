@@ -51,11 +51,11 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 
 	//Moving to start pose
 	jp_type start_pose;
-	start_pose<< 0.0,1.0,0.0, 2.0;
+	start_pose<< 0.0,1.0,0.0, 1.9;
 	wam.moveTo(start_pose);
 
 	//Adding gravity term and unholding joints
-	wam.gravityCompensate();
+	//wam.gravityCompensate();
 	usleep(1500);
 
 	// Set the differentiator mode indicating how many data points it uses
@@ -177,6 +177,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 		force_msg.force[1] = forceEstimator.computedF[1];
 		force_msg.force[2] = forceEstimator.computedF[2];
 		force_msg.time = time.getYValue();
+		force_avg_msg.force_value = forceEstimator.computedF.norm()/9.81;
 		force_publisher.publish(force_msg);
 		
 		if(i == 20){
@@ -185,6 +186,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 			force_avg_msg.force[1] = cf_avg[1];
 			force_avg_msg.force[2] = cf_avg[2];
 			force_avg_msg.time= time.getYValue();
+			force_avg_msg.force_value = cf_avg.norm()/9.81;
 			force_avg_publisher.publish(force_avg_msg);
 			i = 0;
 			cf_avg<< 0.0, 0.0, 0.0;
@@ -204,7 +206,6 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 
 	logger.closeLog();
 	printf("Logging stopped.\n");
-
 
 	log::Reader<tuple_type> lr(tmpFile);
 	lr.exportCSV(argv[1]);

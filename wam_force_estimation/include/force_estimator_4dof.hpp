@@ -48,7 +48,7 @@ protected:
 public:
 cf_type computedF;
 ct_type computedT;
-
+math::Matrix<6,DOF> J;
 
 public:
 	explicit ForceEstimator(bool driveInertias = false, const std::string& sysName = "ForceEstimator"):
@@ -66,7 +66,7 @@ protected:
 
 	Eigen::Vector4d C_inside;
 	Eigen::Matrix4d M_inside;
-	math::Matrix<6,DOF> J;
+
 
 	ja_type ja_sys;
 	jt_type jt_sys, jt_drive, G;
