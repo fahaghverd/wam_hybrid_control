@@ -13,8 +13,12 @@
 #include <Dynamics.hpp>
 #include <differentiator.hpp>
 #include <force_estimator_4dof.hpp>
+#include <wam_surface_Estimator.hpp>
 #include <extended_ramp.hpp>
+#include <get_tool_position_system.hpp>
 #include <get_jacobian_system.hpp>
+#include <robust_cartesian.h>
+#include <extended_Tool_Orientation.hpp>
 #include <unistd.h>
 #include <iostream>
 #include <string>
@@ -56,11 +60,6 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 		return 1;
 	}
 	
-	//Moving to start pose
-	jp_type start_pose;
-	start_pose<< 0.0,1.0,0.0, 1.9;
-	wam.moveTo(start_pose);
-
 	//Adding gravity term and unholding joints
 	wam.gravityCompensate();
 	usleep(1500);
@@ -91,6 +90,11 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	const LowLevelWam<DOF>& llw = wam.getLowLevelWam();
 	systems::Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * drive_inertias.asDiagonal() * llw.getJointToMotorPositionTransform());
 	systems::TupleGrouper<double, cf_type> tg;
+
+	//Adding surface estimator parts
+	SurfaceEstimator<DOF> surface_estimator;
+	ExtendedToolOrientation<DOF> rot;
+	getToolPosition<DOF> cp;
 
 	//Firstorder filter instead of diffrentiator
 	double omega_p = 130.0;
@@ -139,7 +143,41 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<1>());
 	systems::connect(tg.output, logger.input);
 
+	//Connecting input and outputs for surface estimator
+	systems::connect(wam.kinematicsBase.kinOutput, rot.kinInput);
+	systems::connect(wam.kinematicsBase.kinOutput, cp.kinInput);
+	systems::connect(rot.output, surface_estimator.rotInput);
+	systems::connect(cp.output, surface_estimator.cpInput);
+	systems::connect(forceEstimator.cartesianForceOutput, surface_estimator.cfInput);
+	//systems::connect(surface_estimator.P, tg.template getInput<2>());
 	
+
+	//Moving to start pose
+	//jp_type start_pose;
+	//start_pose<< 0.0,1.05,0.0, 1.7;
+	//Initialization Move
+    jp_type wam_init = wam.getHomePosition();
+    wam_init[3] -= .35;
+    wam.moveTo(wam_init); // Adjust the elbow, moving the end-effector out of the haptic boundary and hold position for haptic force initialization.
+	// Change decrease our tool position controller gains slightly
+    cp_type cp_kp, cp_kd;
+    for (size_t i = 0; i < 3; i++)
+    {
+      cp_kp[i] = 1500;
+      cp_kd[i] = 5.0;
+    }
+    wam.tpController.setKp(cp_kp);
+    wam.tpController.setKd(cp_kd);
+	cp_type start_pose;
+	start_pose[0] = 0.554666;
+	start_pose[1] =  0.019945;
+	start_pose[2] =  -0.278530;
+	// start_pose[0] = 0.449502;
+	// start_pose[1] =  -0.26117;
+	// start_pose[2] =  0.130698;
+	wam.moveTo(start_pose, true, 0.05, 0.1);
+
+
 	// Reset and start the time counter
 	{BARRETT_SCOPED_LOCK(pm.getExecutionManager()->getMutex());
 	time.reset();
@@ -160,6 +198,13 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
     std::cout << "Press [Enter] to stop." << std::endl;
 
 	ros::Rate pub_rate(500);
+
+	//cp_type next_pose;
+	//next_pose<< 0.7560848991017444,0.004141827918360781,-0.298530522254321;
+	//wam.moveTo(next_pose);
+	usleep(10);
+
+	std::cout<< surface_estimator.P3 << std::endl;
 
 	int i = 0;
 	cf_type cf_avg;	
@@ -186,18 +231,19 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 		force_msg.force[0] = forceEstimator.computedF[0];
 		force_msg.force[1] = forceEstimator.computedF[1];
 		force_msg.force[2] = forceEstimator.computedF[2];
-		force_avg_msg.force_value = forceEstimator.computedF.norm()/9.81;
+		force_msg.force_norm = forceEstimator.computedF.norm()/9.81;
+		//force_msg.force_dir = forceEstimator.computedF.normalize();
 		force_msg.time = time.getYValue();
 		force_publisher.publish(force_msg);
 		
 		if(i == 20){
-			std::cout<<"J:"<<forceEstimator.J<<std::endl;
 			cf_avg = cf_avg/i;
 			force_avg_msg.force[0] = cf_avg[0];
 			force_avg_msg.force[1] = cf_avg[1];
 			force_avg_msg.force[2] = cf_avg[2];
 			force_avg_msg.time= time.getYValue();
-			force_avg_msg.force_value = cf_avg.norm()/9.81;
+			force_avg_msg.force_norm = cf_avg.norm()/9.81;
+			//force_avg_msg.force_dir = cf_avg.normalize();
 			force_avg_publisher.publish(force_avg_msg);
 			i = 0;
 			cf_avg<< 0.0, 0.0, 0.0;

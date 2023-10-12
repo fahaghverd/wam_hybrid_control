@@ -1,9 +1,15 @@
 /*
- *  Created on: August, 2023
+ *  Created on: Oct, 2023
  *      Author: Faezeh
  */
  
 #pragma once
+
+
+#include <barrett/units.h>
+#include <barrett/systems.h>
+
+using namespace barrett;
 
 template<size_t DOF>
 class getJacobian : public System, public systems::SingleOutput<math::Matrix<6,DOF>>,
