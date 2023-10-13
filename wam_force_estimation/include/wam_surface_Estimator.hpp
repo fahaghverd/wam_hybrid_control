@@ -27,41 +27,50 @@ public:
 
 // IO  (outputs)
 public:
-	Output<math::Matrix<3,3>> P;    // P matrix including position dir, force dir, and surface normal
+	Output<cp_type> P1;    //  position dir 
+    Output<cf_type> P2;    // force dir
+    Output<cp_type> P3; 
 
 protected:
-	typename Output<math::Matrix<3,3>>::Value* PValue;
-
+	typename Output<cp_type>::Value* P1Value;
+    typename Output<cf_type>::Value* P2Value;
+    typename Output<cp_type>::Value* P3Value;
 public:
-    Eigen::Vector3d P3;
+    math::Matrix<3,3> p;
 
 public:
 	explicit SurfaceEstimator(const std::string& sysName = "SurfaceEstimator"):
-		System(sysName), cpInput(this), cfInput(this), rotInput(this), P(this, &PValue){}
+		System(sysName), cpInput(this), cfInput(this), rotInput(this), P1(this, &P1Value), P3(this, &P3Value), P2(this, &P2Value){}
 
 	virtual ~SurfaceEstimator() { this->mandatoryCleanUp(); }
 
 protected:
-    cp_type pre_cp, P1;
-    cf_type P2;
-    
-    math::Matrix<3,3> R, p;
+    cp_type p3;
+    cp_type pre_cp, p1,p1n;
+    cf_type p2, p2n;
+    math::Matrix<3,3> R;
     Eigen::Matrix<double, 3, 2> cps; //cartesian position, current and previous
 
     virtual void operate() {
         /*Taking force and position values from the input*/
         cps.col(0) = cps.col(1);
         cps.col(1) = this->cpInput.getValue(); 
-        P1 =  cps.col(1) - cps.col(0);
-        P2 = this->cfInput.getValue();
-        P2 = R * P2; //transforming from world to tool
-        P3 = P1.cross(P2);
+        p1 =  cps.col(1) - cps.col(0);
+        p1n = p1.normalized();
+        p2 = this->cfInput.getValue();
+        R = this->rotInput.getValue();
+        p2n = p2.normalized();
+        p2 = R * p2n; //transforming from world to tool
+        
+        p3 = p1n.cross(p2);
 
-        p.col(0) = P1;
-        p.col(1) = P2;
-        p.col(2) = P3;
+        p.col(0) = p1n;
+        p.col(1) = p2;
+        p.col(2) = p3;
 
-        PValue->setData(&p);
+        P1Value->setData(&p1n);
+        P2Value->setData(&p2);
+        P3Value->setData(&p3);
     }
 
 private:

@@ -24,18 +24,30 @@ class ExtendedToolOrientation : public System, public KinematicsInput<DOF>,
 public:
 	ExtendedToolOrientation(const std::string& sysName = "ExtendedToolOrientation") :
 		System(sysName), KinematicsInput<DOF>(this),
-		SingleOutput<math::Matrix<3,3>>(this), rot() {}
+		SingleOutput<math::Matrix<3,3>>(this){}
 	virtual ~ExtendedToolOrientation() { mandatoryCleanUp(); }
 
 protected:
-	virtual void operate() {
-		rot.copyFrom(this->kinInput.getValue().impl->tool->rot_to_world);
-		rot = rot.transpose(); // Transpose to get world-to-tool rotation
+	gsl_matrix * r;
+	math::Matrix<3,3> rot, R;
 
-		this->outputValue->setData(&rot);
+	virtual void operate() {
+		r = this->kinInput.getValue().impl->tool->rot_to_world;
+		// Convert GSL matrix to Eigen matrix
+		for (size_t row = 0; row < 3; ++row) {
+			for (size_t col = 0; col < 3; ++col) {
+				// Access the element in the GSL matrix and copy it to the math::Matrix
+				double value = gsl_matrix_get(r, row, col);
+				rot(row, col) = value;
+			}
+		}
+		
+		R = rot.transpose(); // Transpose to get world-to-tool rotation
+		//std::cout<<R<<std::endl;
+		this->outputValue->setData(&R);
 	}
 
-	math::Matrix<3,3> rot;
+	
 
 private:
 	DISALLOW_COPY_AND_ASSIGN(ExtendedToolOrientation);

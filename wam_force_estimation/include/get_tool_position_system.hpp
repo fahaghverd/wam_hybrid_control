@@ -18,11 +18,13 @@ class getToolPosition : public System, public systems::SingleOutput<units::Carte
 	BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
 
 public:
-	getToolPosition(const std::string& sysName = "getToolPosition"): System(sysName), SingleOutput<cp_type>(this), KinematicsInput<DOF>(this) {}
+	getToolPosition(const std::string& sysName = "getToolPosition"):
+	System(sysName), SingleOutput<cp_type>(this), KinematicsInput<DOF>(this) {}
 	virtual ~getToolPosition() {this->mandatoryCleanUp(); }
 
 protected:
 	cp_type cp;
+
 	virtual void operate() {
 		cp = cp_type(this->kinInput.getValue().impl->tool->origin_pos);
 		this->outputValue->setData(&cp);

@@ -24,6 +24,7 @@ public:
 protected:
 	math::Matrix<6,DOF> Jacobian;
 	gsl_matrix * j;
+	
 	virtual void operate() {
 		j = this->kinInput.getValue().impl->tool_jacobian;
 		// Convert GSL matrix to Eigen matrix

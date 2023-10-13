@@ -39,6 +39,30 @@
 #include <ros/ros.h>
 #include <wam_force_estimation/RTCartForce.h>
 
+// Function to generate waypoints along a cubic spline
+std::vector<units::CartesianPosition::type> generateCubicSplineWaypoints(const units::CartesianPosition::type& initialPos, const units::CartesianPosition::type& finalPos, double waypointSpacing) {
+    std::vector<units::CartesianPosition::type> waypoints;
+
+    Eigen::Vector3d deltaPos = finalPos - initialPos;
+    double totalDistance = deltaPos.norm();
+
+    // Determine the number of waypoints
+    int numWaypoints = static_cast<int>(totalDistance / waypointSpacing);
+    if (numWaypoints < 2) {
+        // Ensure at least two waypoints
+        numWaypoints = 2;
+        waypointSpacing = totalDistance / (numWaypoints - 1);
+    }
+
+    for (int i = 0; i < numWaypoints; ++i) {
+        double t = static_cast<double>(i) / (numWaypoints - 1);
+        Eigen::Vector3d waypoint = initialPos + t * deltaPos;
+        waypoints.push_back(waypoint);
+    }
+
+    return waypoints;
+}
+
 template<size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
@@ -60,6 +84,12 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 		return 1;
 	}
 	
+	//Moving to start pose
+	jp_type POS_READY;
+	POS_READY << 0.002227924477643431, -0.1490540623980915, -0.04214558734519736, 1.6803055108189549;
+	//POS_READY<< 0.0,1.05,0.0, 1.7;
+	//wam.moveTo(POS_READY);
+
 	//Adding gravity term and unholding joints
 	wam.gravityCompensate();
 	usleep(1500);
@@ -79,7 +109,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	libconfig::Setting& setting = pm.getConfig().lookup(pm.getWamDefaultConfigPath());
 
 	//Instantiating systems
-	typedef boost::tuple<double, cf_type> tuple_type;
+	typedef boost::tuple<double, cp_type, cf_type, cp_type> tuple_type;
 	systems::GravityCompensator<DOF> gravityTerm(setting["gravity_compensation"]);
 	getJacobian<DOF> getWAMJacobian;
 	ForceEstimator<DOF> forceEstimator(true);
@@ -89,7 +119,9 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	ExtendedRamp time(pm.getExecutionManager(), 1.0);
 	const LowLevelWam<DOF>& llw = wam.getLowLevelWam();
 	systems::Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * drive_inertias.asDiagonal() * llw.getJointToMotorPositionTransform());
-	systems::TupleGrouper<double, cf_type> tg;
+	systems::TupleGrouper<double, cp_type, cf_type, cp_type> tg;
+	systems::PrintToStream<cf_type> print(pm.getExecutionManager());
+
 
 	//Adding surface estimator parts
 	SurfaceEstimator<DOF> surface_estimator;
@@ -140,25 +172,23 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	systems::connect(wam4dofDynamics.MassMAtrixOutput, forceEstimator.M);
 	systems::connect(wam4dofDynamics.CVectorOutput, forceEstimator.C);
 
-	systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<1>());
-	systems::connect(tg.output, logger.input);
+	//systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<1>());	
 
 	//Connecting input and outputs for surface estimator
 	systems::connect(wam.kinematicsBase.kinOutput, rot.kinInput);
 	systems::connect(wam.kinematicsBase.kinOutput, cp.kinInput);
-	systems::connect(rot.output, surface_estimator.rotInput);
+	systems::connect(rot.output, surface_estimator.rotInput); //this does not work!
 	systems::connect(cp.output, surface_estimator.cpInput);
 	systems::connect(forceEstimator.cartesianForceOutput, surface_estimator.cfInput);
-	//systems::connect(surface_estimator.P, tg.template getInput<2>());
-	
+	systems::connect(surface_estimator.P1, tg.template getInput<1>());
+	systems::connect(surface_estimator.P2, tg.template getInput<2>());
+	systems::connect(surface_estimator.P3, tg.template getInput<3>());
+	systems::connect(tg.output, logger.input);
+	//Initialization Move when starting 
+    //jp_type wam_init = wam.getHomePosition();
+    //wam_init[3] -= .35;
+    //wam.moveTo(wam_init); // Adjust the elbow, moving the end-effector out of the haptic boundary and hold position for haptic force initialization.
 
-	//Moving to start pose
-	//jp_type start_pose;
-	//start_pose<< 0.0,1.05,0.0, 1.7;
-	//Initialization Move
-    jp_type wam_init = wam.getHomePosition();
-    wam_init[3] -= .35;
-    wam.moveTo(wam_init); // Adjust the elbow, moving the end-effector out of the haptic boundary and hold position for haptic force initialization.
 	// Change decrease our tool position controller gains slightly
     cp_type cp_kp, cp_kd;
     for (size_t i = 0; i < 3; i++)
@@ -168,14 +198,18 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
     }
     wam.tpController.setKp(cp_kp);
     wam.tpController.setKd(cp_kd);
+	
+	//making spline from current cp to start cp
 	cp_type start_pose;
 	start_pose[0] = 0.554666;
 	start_pose[1] =  0.019945;
-	start_pose[2] =  -0.278530;
-	// start_pose[0] = 0.449502;
-	// start_pose[1] =  -0.26117;
-	// start_pose[2] =  0.130698;
-	wam.moveTo(start_pose, true, 0.05, 0.1);
+	start_pose[2] =  -0.268530;
+	std::vector<cp_type> waypoints = generateCubicSplineWaypoints(wam.getToolPosition(), start_pose,0.05);
+	for (const cp_type& waypoint : waypoints) {
+		//std::cout << "Waypoint: " << waypoint.transpose() << std::endl;
+		//wam.moveTo(waypoint, true, 0.05);
+	}
+	
 
 
 	// Reset and start the time counter
@@ -199,12 +233,16 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 
 	ros::Rate pub_rate(500);
 
-	//cp_type next_pose;
-	//next_pose<< 0.7560848991017444,0.004141827918360781,-0.298530522254321;
-	//wam.moveTo(next_pose);
+	cp_type next_pose;
+	next_pose<< 0.6560848991017444,0.019945,-0.208530522254321;
+	std::vector<cp_type> waypoints2 = generateCubicSplineWaypoints(wam.getToolPosition(), next_pose,0.05);
+	for (const cp_type& waypoint : waypoints2) {
+		//std::cout << "Waypoint: " << waypoint.transpose() << std::endl;
+		//wam.moveTo(waypoint, true, 0.05);
+	}
 	usleep(10);
-
-	std::cout<< surface_estimator.P3 << std::endl;
+	std::cout << "Estimated F:" <<forceEstimator.computedF << std::endl;
+	std::cout<< surface_estimator.rotInput.getValue() << std::endl;
 
 	int i = 0;
 	cf_type cf_avg;	

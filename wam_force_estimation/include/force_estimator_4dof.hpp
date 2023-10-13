@@ -66,7 +66,8 @@ protected:
 
 	Eigen::Vector4d C_inside;
 	Eigen::Matrix4d M_inside;
-
+	cf_type cf;
+	ct_type ct;
 
 	ja_type ja_sys;
 	jt_type jt_sys, jt_drive, G;
@@ -120,7 +121,8 @@ protected:
 		
 		computedF << estimatedF[0], estimatedF[1], estimatedF[2];
 		computedT << estimatedT[0], estimatedT[1], estimatedT[2];
-
+		cf = computedF;
+		ct = computedT;
 		cartesianForceOutputValue->setData(&computedF);
  		cartesianTorqueOutputValue->setData(&computedT);
 	}
