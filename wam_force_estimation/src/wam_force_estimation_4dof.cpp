@@ -1,13 +1,11 @@
 /*
  * wam_force_estimator.cpp
  *
+ * In this script, we use dynamic matrices derived for 4-DOF WAM by Aritra Mitra et al.
+ * GitHub Repo: https://github.com/raj111samant/Model-based-control-of-4-DOF-Barrett-Wam/tree/master/WAM-C%2B%2B-Codes
  * 
- * 
- * In this script we use dynamic matrices drived for 4dof wam by Aritra Mitra et al., at this repo :
- * https://github.com/raj111samant/Model-based-control-of-4-DOF-Barrett-Wam/tree/master/WAM-C%2B%2B-Codes
- * 
- *  Created on: August, 2023
- *      Author: Faezeh
+ * Created on: August, 2023
+ * Author: Faezeh
  */
 
 #include <Dynamics.hpp>
@@ -38,20 +36,20 @@
 #include <fcntl.h>
 
 #include <ros/ros.h>
-#include <wam_force_estimation/RTCartForce.h>
+#include <wam_force_estimation/RTCartForce>
 
 using namespace barrett;
 using namespace systems;
 
 // Function to generate waypoints along a cubic spline and move to them
-template<size_t DOF>
+template <size_t DOF>
 std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
     Wam<DOF>& wam,
     const units::CartesianPosition::type& initialPos,
     const units::CartesianPosition::type& finalPos,
     double waypointSpacing
 ) {
-	BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);	
+    BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
     std::vector<units::CartesianPosition::type> waypoints;
 
     Eigen::Vector3d deltaPos = finalPos - initialPos;
@@ -77,13 +75,10 @@ std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
     return waypoints;
 }
 
-template<size_t DOF>
+template <size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
-
- 	BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);	
+    BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
     typedef boost::tuple<double, cp_type, cf_type, cp_type> tuple_type;
-
-   
 
     // Initialize ROS node and publishers
     ros::init(argc, argv, "force_estimator_node");
@@ -93,7 +88,7 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
 
     // Setting up real-time command timeouts and initial values
     ros::Duration rt_msg_timeout;
-    rt_msg_timeout.fromSec(0.2); // rt_status will be determined false if rt message is not received in specified time
+    rt_msg_timeout.fromSec(0.2); // rt_status will be determined false if rt message is not received in the specified time
 
     // Temporary file for logger
     char tmpFile[] = "/tmp/btXXXXXX";
@@ -105,14 +100,13 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     // Moving to the start pose
     jp_type POS_READY;
     POS_READY << 0.002227924477643431, -0.1490540623980915, -0.04214558734519736, 1.6803055108189549;
-    // POS_READY << 0.0, 1.05, 0.0, 1.7;
+    wam.moveTo(POS_READY);
 
     // Adding gravity term and unholding joints
     wam.gravityCompensate();
     usleep(1500);
 
-
-	// Set the differentiator mode indicating how many data points it uses
+    // Set the differentiator mode indicating how many data points it uses
     int mode = 5;
     ja_type zero_acc;
 
@@ -124,27 +118,26 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     drive_inertias[3] = 10686e-8;
     libconfig::Setting& setting = pm.getConfig().lookup(pm.getWamDefaultConfigPath());
 
-
- 	//Instantiate systems
+    // Instantiate systems
     GravityCompensator<DOF> gravityTerm(setting["gravity_compensation"]);
     getJacobian<DOF> getWAMJacobian;
     ForceEstimator<DOF> forceEstimator(true);
     Dynamics<DOF> wam4dofDynamics;
-	differentiator<DOF, jv_type, ja_type> diff(mode);
-	ExtendedRamp time(pm.getExecutionManager(), 1.0);
+    differentiator<DOF, jv_type, ja_type> diff(mode);
+    ExtendedRamp time(pm.getExecutionManager(), 1.0);
     Constant<ja_type> zero(zero_acc);
     const LowLevelWam<DOF>& llw = wam.getLowLevelWam();
     Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * drive_inertias.asDiagonal() * llw.getJointToMotorPositionTransform());
     TupleGrouper<double, cp_type, cf_type, cp_type> tg;
     PrintToStream<cf_type> print(pm.getExecutionManager());
 
-	//Add surface estimator parts
-	SurfaceEstimator<DOF> surface_estimator;
-	ExtendedToolOrientation<DOF> rot;
-	getToolPosition<DOF> cp;
+    // Add surface estimator parts
+    SurfaceEstimator<DOF> surface_estimator;
+    ExtendedToolOrientation<DOF> rot;
+    getToolPosition<DOF> cp;
 
     // First-order filter instead of differentiator
-    double omega_p = 130.0;
+    double omega_p = 180.0;
     FirstOrderFilter<jv_type> hp;
     hp.setHighPass(jv_type(omega_p), jv_type(omega_p));
     pm.getExecutionManager()->startManaging(hp);
@@ -157,80 +150,61 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
         new log::RealTimeWriter<tuple_type>(tmpFile, PERIOD_MULTIPLIER * pm.getExecutionManager()->getPeriod()),
         PERIOD_MULTIPLIER);
 
-	
-	// Connecting system potrs
-	connect(time.output, tg.template getInput<0>());
+    // Connecting system ports
+    connect(time.output, tg.template getInput<0>());
 
-	// Using First-order filter instead of differentiator
-	//connect(wam.jvOutput, hp.input);
-	//connect(hp.output, changeUnits.input);
-	//connect(changeUnits.output, forceEstimator.jaInput);
-	//connect(changeUnits.output, driveInertias.input);	
-	//connect(changeUnits.output,forceEstimator.jaInput);	
+    // Using First-order filter instead of differentiator
+    // connect(wam.jvOutput, hp.input);
+    // connect(hp.output, changeUnits.input);
+    // connect(changeUnits.output, forceEstimator.jaInput);
+    // connect(changeUnits.output, driveInertias.input);
 
-	// Using diffrantiator
-	//connect(time.output, diff.time);
-	//connect(wam.jvOutput, diff.inputSignal);
-	//connect(diff.outputSignal, forceEstimator.jaInput);
-	//connect(diff.outputSignal, driveInertias.input);
+    // Using differentiator
+    connect(time.output, diff.time);
+    connect(wam.jvOutput, diff.inputSignal);
+    connect(diff.outputSignal, forceEstimator.jaInput);
+    connect(diff.outputSignal, driveInertias.input);
 
-	// Zero Acc
-	connect(zero.output, forceEstimator.jaInput);
+    // Zero Acc
+    // connect(zero.output, forceEstimator.jaInput);
 
-	connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
-	connect(getWAMJacobian.output, forceEstimator.Jacobian);
+    connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
+    connect(getWAMJacobian.output, forceEstimator.Jacobian);
 
-	connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
-	connect(gravityTerm.output, forceEstimator.g);
+    connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
+    connect(gravityTerm.output, forceEstimator.g);
 
-	connect(zero.output, driveInertias.input);
-	connect(driveInertias.output, forceEstimator.rotorInertiaEffect);
+    // connect(zero.output, driveInertias.input);
+    connect(driveInertias.output, forceEstimator.rotorInertiaEffect);
 
-	connect(wam.jtSum.output, forceEstimator.jtInput);
-	
-	connect(wam.jpOutput, wam4dofDynamics.jpInputDynamics);
-	connect(wam.jvOutput, wam4dofDynamics.jvInputDynamics);
-	connect(wam4dofDynamics.MassMAtrixOutput, forceEstimator.M);
-	connect(wam4dofDynamics.CVectorOutput, forceEstimator.C);
+    connect(wam.jtSum.output, forceEstimator.jtInput);
 
-	//systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<1>());	
+    connect(wam.jpOutput, wam4dofDynamics.jpInputDynamics);
+    connect(wam.jvOutput, wam4dofDynamics.jvInputDynamics);
+    connect(wam4dofDynamics.MassMAtrixOutput, forceEstimator.M);
+    connect(wam4dofDynamics.CVectorOutput, forceEstimator.C);
 
-	//Connecting input and outputs for surface estimator
-	connect(wam.kinematicsBase.kinOutput, rot.kinInput);
-	connect(rot.output, surface_estimator.rotInput); //this does not work!
+    // systems::connect(forceEstimator.cartesianForceOutput, tg.template getInput<1>());
 
-	connect(wam.kinematicsBase.kinOutput, cp.kinInput);
-	connect(cp.output, surface_estimator.cpInput);
+    // Connecting input and outputs for surface estimator
+    connect(wam.kinematicsBase.kinOutput, rot.kinInput);
+    connect(rot.output, surface_estimator.rotInput);
 
-	connect(forceEstimator.cartesianForceOutput, surface_estimator.cfInput);
+    connect(wam.kinematicsBase.kinOutput, cp.kinInput);
+    connect(cp.output, surface_estimator.cpInput);
 
-	connect(surface_estimator.P1, tg.template getInput<1>());
-	connect(surface_estimator.P2, tg.template getInput<2>());
-	connect(surface_estimator.P3, tg.template getInput<3>());
-	connect(tg.output, logger.input);
+    connect(forceEstimator.cartesianForceOutput, surface_estimator.cfInput);
+    // connect(forceEstimator.cartesianForceOutput, print.input);
 
-	//Initialization Move when starting 
-    //jp_type wam_init = wam.getHomePosition();
-    //wam_init[3] -= .35;
-    //wam.moveTo(wam_init); // Adjust the elbow, moving the end-effector out of the haptic boundary and hold position for haptic force initialization.
+    connect(surface_estimator.P1, tg.template getInput<1>());
+    connect(surface_estimator.P2, tg.template getInput<2>());
+    connect(surface_estimator.P3, tg.template getInput<3>());
+    connect(tg.output, logger.input);
 
-	// Change decrease our tool position controller gains slightly
-    cp_type cp_kp, cp_kd;
-    for (size_t i = 0; i < 3; i++)
-    {
-      cp_kp[i] = 1500;
-      cp_kd[i] = 5.0;
-    }
-    wam.tpController.setKp(cp_kp);
-    wam.tpController.setKd(cp_kd);
-	
-	//Making spline from current cp to start cp
-	cp_type start_pose;
-	start_pose[0] = 0.554666;
-	start_pose[1] =  0.019945;
-	start_pose[2] =  -0.268530;
-	std::vector<cp_type> waypoints = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), start_pose, 0.05);
-
+    // Initialization Move when starting
+    // jp_type wam_init = wam.getHomePosition();
+    // wam_init[3] -= .35;
+    // wam.moveTo(wam_init); // Adjust the elbow, moving the end-effector out of the haptic boundary and hold position for haptic force initialization.
 
     // Reset and start the time counter
     {
@@ -238,10 +212,26 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
         time.reset();
         time.start();
     }
-	
-	printf("Logging started.\n");
 
-	// Set terminal input to non-blocking mode
+    // Change decrease our tool position controller gains slightly
+    cp_type cp_kp, cp_kd;
+    for (size_t i = 0; i < 3; i++) {
+        cp_kp[i] = 1500;
+        cp_kd[i] = 5.0;
+    }
+    wam.tpController.setKp(cp_kp);
+    wam.tpController.setKd(cp_kd);
+
+    // Making a spline from the current cp to the start cp
+    cp_type start_pose;
+    start_pose[0] = 0.554666;
+    start_pose[1] = 0.019945;
+    start_pose[2] = -0.268530;
+    std::vector<cp_type> waypoints = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), start_pose, 0.05);
+
+    printf("Logging started.\n");
+
+    // Set terminal input to non-blocking mode
     struct termios oldSettings, newSettings;
     tcgetattr(STDIN_FILENO, &oldSettings);
     newSettings = oldSettings;
@@ -249,83 +239,79 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     tcsetattr(STDIN_FILENO, TCSANOW, &newSettings);
     fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
 
-	bool inputReceived = false;
+    bool inputReceived = false;
     std::string lineInput2;
     std::cout << "Press [Enter] to stop." << std::endl;
 
-	ros::Rate pub_rate(500);
+    ros::Rate pub_rate(500);
 
-	cp_type next_pose;
-	next_pose<< 0.6560848991017444,0.019945,-0.208530522254321;
-	std::vector<cp_type> waypoints2 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), next_pose,0.05);
-	usleep(10);
+    cp_type next_pose;
+    next_pose << 0.6560848991017444, 0.019945, -0.208530522254321;
+    std::vector<cp_type> waypoints2 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), next_pose, 0.05);
+    usleep(10);
 
-	std::cout << "Estimated F:" <<forceEstimator.computedF << std::endl;
-	std::cout<< surface_estimator.rotInput.getValue() << std::endl;
+    std::cout << "Estimated F:" << forceEstimator.computedF << std::endl;
+    std::cout << "P" << surface_estimator.p << std::endl;
 
-	int i = 0;
-	cf_type cf_avg;	
-	wam_force_estimation::RTCartForce force_msg;
-	wam_force_estimation::RTCartForce force_avg_msg;
-	btsleep(1);
-	while (ros::ok() && pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE){
-		// Process pending ROS events and execute callbacks
-		ros::spinOnce();
+    int i = 0;
+    cf_type cf_avg;
+    wam_force_estimation::RTCartForce force_msg;
+    wam_force_estimation::RTCartForce force_avg_msg;
+    btsleep(1);
+    while (ros::ok() && pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE) {
+        // Process pending ROS events and execute callbacks
+        ros::spinOnce();
 
-		char c;		
-		if (read(STDIN_FILENO, &c, 1) > 0) {
+        char c;
+        if (read(STDIN_FILENO, &c, 1) > 0) {
             if (c == '\n') {
                 inputReceived = true;
                 break;
             }
         }
-		
-		//std::cout<< cf_avg << std::endl;
 
-		i++;
-		cf_avg = cf_avg + forceEstimator.computedF;
-		//std::cout << "Estimated F:" <<forceEstimator.computedF << std::endl;
-		force_msg.force[0] = forceEstimator.computedF[0];
-		force_msg.force[1] = forceEstimator.computedF[1];
-		force_msg.force[2] = forceEstimator.computedF[2];
-		force_msg.force_norm = forceEstimator.computedF.norm()/9.81;
-		//force_msg.force_dir = forceEstimator.computedF.normalize();
-		force_msg.time = time.getYValue();
-		force_publisher.publish(force_msg);
-		
-		if(i == 20){
-			cf_avg = cf_avg/i;
-			force_avg_msg.force[0] = cf_avg[0];
-			force_avg_msg.force[1] = cf_avg[1];
-			force_avg_msg.force[2] = cf_avg[2];
-			force_avg_msg.time= time.getYValue();
-			force_avg_msg.force_norm = cf_avg.norm()/9.81;
-			//force_avg_msg.force_dir = cf_avg.normalize();
-			force_avg_publisher.publish(force_avg_msg);
-			i = 0;
-			cf_avg<< 0.0, 0.0, 0.0;
-			}
-		
-		pub_rate.sleep();
-	}
+        i++;
+        cf_avg = cf_avg + forceEstimator.computedF;
+        force_msg.force[0] = forceEstimator.computedF[0];
+        force_msg.force[1] = forceEstimator.computedF[1];
+        force_msg.force[2] = forceEstimator.computedF[2];
+        force_msg.force_norm = forceEstimator.computedF.norm() / 9.81;
+        // force_msg.force_dir = forceEstimator.computedF.normalize();
+        force_msg.time = time.getYValue();
+        force_publisher.publish(force_msg);
 
-					
-	//Restore terminal settings
+        if (i == 20) {
+            cf_avg = cf_avg / i;
+            force_avg_msg.force[0] = cf_avg[0];
+            force_avg_msg.force[1] = cf_avg[1];
+            force_avg_msg.force[2] = cf_avg[2];
+            force_avg_msg.time = time.getYValue();
+            force_avg_msg.force_norm = cf_avg.norm() / 9.81;
+            // force_avg_msg.force_dir = cf_avg.normalize();
+            force_avg_publisher.publish(force_avg_msg);
+            i = 0;
+            cf_avg << 0.0, 0.0, 0.0;
+        }
+
+        pub_rate.sleep();
+    }
+
+    // Restore terminal settings
     tcsetattr(STDIN_FILENO, TCSANOW, &oldSettings);
     fcntl(STDIN_FILENO, F_SETFL, 0);
-	
-	//Stop the time counter and disconnect controllers
-	time.stop();
-	wam.moveHome();
-	//wam.idle();
-	
-	logger.closeLog();
-	printf("Logging stopped.\n");
 
-	log::Reader<tuple_type> lr(tmpFile);
-	lr.exportCSV(argv[1]);
-	printf("Output written to %s.\n", argv[1]);
-	std::remove(tmpFile);
+    // Stop the time counter and disconnect controllers
+    time.stop();
+    wam.idle();
+    wam.moveHome();
 
-	return 0;
+    logger.closeLog();
+    printf("Logging stopped.\n");
+
+    log::Reader<tuple_type> lr(tmpFile);
+    lr.exportCSV(argv[1]);
+    printf("Output written to %s.\n", argv[1]);
+    std::remove(tmpFile);
+
+    return 0;
 }

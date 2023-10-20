@@ -121,8 +121,10 @@ protected:
 		
 		computedF << estimatedF[0], estimatedF[1], estimatedF[2];
 		computedT << estimatedT[0], estimatedT[1], estimatedT[2];
+		
 		cf = computedF;
 		ct = computedT;
+
 		cartesianForceOutputValue->setData(&computedF);
  		cartesianTorqueOutputValue->setData(&computedT);
 	}
