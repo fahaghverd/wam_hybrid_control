@@ -36,7 +36,7 @@
 #include <fcntl.h>
 
 #include <ros/ros.h>
-#include <wam_force_estimation/RTCartForce>
+#include <wam_force_estimation/RTCartForce.h>
 
 using namespace barrett;
 using namespace systems;
@@ -226,7 +226,7 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     cp_type start_pose;
     start_pose[0] = 0.554666;
     start_pose[1] = 0.019945;
-    start_pose[2] = -0.268530;
+    start_pose[2] = -0.198530;
     std::vector<cp_type> waypoints = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), start_pose, 0.05);
 
     printf("Logging started.\n");
@@ -246,12 +246,22 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     ros::Rate pub_rate(500);
 
     cp_type next_pose;
-    next_pose << 0.6560848991017444, 0.019945, -0.208530522254321;
+    next_pose << 0.6560848991017444, 0.019945, -0.1908530522254321;
     std::vector<cp_type> waypoints2 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), next_pose, 0.05);
     usleep(10);
 
+	cp_type test_pose, p_test;
+	Eigen::Matrix3d s;
+	s << 1, 0, 0,
+		0, 0, 0,
+		0, 0, 1;
+	test_pose << 0.7060848991017444, 0.119945, -0.408530522254321;
+	p_test = wam.getToolOrientation()*surface_estimator.p.inverse()*s*surface_estimator.p*wam.getToolOrientation().inverse()*test_pose;
+	//std::vector<cp_type> waypoints3 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), p_test, 0.05);
     std::cout << "Estimated F:" << forceEstimator.computedF << std::endl;
-    std::cout << "P" << surface_estimator.p << std::endl;
+    std::cout << p_test << std::endl;
+	std::cout << surface_estimator.p << std::endl;
+	std::cout << wam.getToolOrientation().toRotationMatrix() << std::endl;
 
     int i = 0;
     cf_type cf_avg;
