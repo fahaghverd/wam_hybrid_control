@@ -25,13 +25,13 @@ public:
 
     // Outputs
     Output<cp_type> P1;  // Position direction
-    Output<cf_type> P2;  // Force direction
-    Output<cp_type> P3;  // Position vector
+    Output<cp_type> P2;  // Force direction
+    Output<cf_type> P3;  // Position vector
 
 protected:
     typename Output<cp_type>::Value* P1Value;
-    typename Output<cf_type>::Value* P2Value;
-    typename Output<cp_type>::Value* P3Value;
+    typename Output<cp_type>::Value* P2Value;
+    typename Output<cf_type>::Value* P3Value;
 
 public:
     math::Matrix<3, 3> p;
@@ -76,12 +76,12 @@ protected:
                 p3 = p1n.cross(p2);
 
                 p.col(0) = p1n;
-                p.col(1) = p2;
-                p.col(2) = p3;
+                p.col(1) = p3;
+                p.col(2) = p2;
 
                 P1Value->setData(&p1n);
-                P2Value->setData(&p2);
-                P3Value->setData(&p3);
+                P2Value->setData(&p3);
+                P3Value->setData(&p2);
             }
         }
     }

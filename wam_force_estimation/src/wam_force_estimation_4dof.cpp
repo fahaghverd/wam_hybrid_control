@@ -78,7 +78,7 @@ std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
 template <size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
-    typedef boost::tuple<double, cp_type, cf_type, cp_type> tuple_type;
+    typedef boost::tuple<double, cp_type, cp_type, cf_type> tuple_type;
 
     // Initialize ROS node and publishers
     ros::init(argc, argv, "force_estimator_node");
@@ -128,7 +128,7 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     Constant<ja_type> zero(zero_acc);
     const LowLevelWam<DOF>& llw = wam.getLowLevelWam();
     Gain<ja_type, sqm_type, jt_type> driveInertias(llw.getJointToMotorPositionTransform().transpose() * drive_inertias.asDiagonal() * llw.getJointToMotorPositionTransform());
-    TupleGrouper<double, cp_type, cf_type, cp_type> tg;
+    TupleGrouper<double, cp_type, cp_type, cf_type> tg;
     PrintToStream<cf_type> print(pm.getExecutionManager());
 
     // Add surface estimator parts
@@ -226,7 +226,7 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     cp_type start_pose;
     start_pose[0] = 0.554666;
     start_pose[1] = 0.019945;
-    start_pose[2] = -0.198530;
+    start_pose[2] = -0.18;
     std::vector<cp_type> waypoints = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), start_pose, 0.05);
 
     printf("Logging started.\n");
@@ -246,22 +246,30 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     ros::Rate pub_rate(500);
 
     cp_type next_pose;
-    next_pose << 0.6560848991017444, 0.019945, -0.1908530522254321;
+    next_pose << 0.6560848991017444, 0.019945, -0.18;
     std::vector<cp_type> waypoints2 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), next_pose, 0.05);
     usleep(10);
 
 	cp_type test_pose, p_test;
 	Eigen::Matrix3d s;
 	s << 1, 0, 0,
-		0, 0, 0,
-		0, 0, 1;
-	test_pose << 0.7060848991017444, 0.119945, -0.408530522254321;
+		0, 1, 0,
+		0, 0, 0;
+	test_pose << 0.7060848991017444, 0.119945, 0.4;
 	p_test = wam.getToolOrientation()*surface_estimator.p.inverse()*s*surface_estimator.p*wam.getToolOrientation().inverse()*test_pose;
-	//std::vector<cp_type> waypoints3 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), p_test, 0.05);
+	std::vector<cp_type> waypoints3 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), p_test, 0.05);
+    
+    
+
+    f_d = 1.0;
+    Eigen::MatrixXd I(3, 3);
+    I.setIdentity();
+    cf_type u_cf; 
+    u_cf = surface_estimator.p.inverse()*(I-s)*surface_estimator.p*(f_d - forceEstimator.computedF);
     std::cout << "Estimated F:" << forceEstimator.computedF << std::endl;
     std::cout << p_test << std::endl;
-	std::cout << surface_estimator.p << std::endl;
-	std::cout << wam.getToolOrientation().toRotationMatrix() << std::endl;
+
+
 
     int i = 0;
     cf_type cf_avg;
