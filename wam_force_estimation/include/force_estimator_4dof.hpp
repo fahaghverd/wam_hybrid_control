@@ -8,7 +8,7 @@
 
 
 #pragma once
-#include <Eigen/Dense>
+#include <eigen3/Eigen/Dense>
 #include <barrett/units.h>
 #include <barrett/systems.h>
 #include <barrett/math/kinematics.h> 

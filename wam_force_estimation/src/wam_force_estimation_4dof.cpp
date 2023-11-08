@@ -41,6 +41,7 @@
 using namespace barrett;
 using namespace systems;
 
+
 // Function to generate waypoints along a cubic spline and move to them
 template <size_t DOF>
 std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
@@ -75,6 +76,73 @@ std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
     return waypoints;
 }
 
+/*
+template <size_t DOF>
+std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
+    Wam<DOF>& wam,
+    const units::CartesianPosition::type& initialPos,
+    const units::CartesianPosition::type& finalPos,
+    double offset
+) {
+    BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
+    std::vector<units::CartesianPosition::type> waypoints;
+
+    Eigen::Vector3d deltaPos = finalPos - initialPos;
+    double totalDistance = deltaPos.norm();
+
+    // Calculate intermediate positions by offsetting x, y, and z
+    Eigen::Vector3d yeeb = initialPos + deltaPos * offset;
+    Eigen::Vector3d goalb = finalPos - deltaPos * offset;
+
+    // Bezier interpolation
+    int numPop = 1000;
+    std::vector<Eigen::Vector3d> plPop;
+    for (int i = 0; i < numPop; ++i) {
+        double t = static_cast<double>(i) / (numPop - 1);
+        Eigen::Vector3d pl = (1 - t) * (1 - t) * (1 - t) * initialPos +
+                             3 * (1 - t) * (1 - t) * t * yeeb +
+                             3 * (1 - t) * t * t * goalb +
+                             t * t * t * finalPos;
+        plPop.push_back(pl);
+    }
+
+    // Calculate the subset of points to sample
+    int steps = 20;
+    double squish = 2.0;
+    std::vector<double> midArr;
+    for (double t = -squish; t <= squish; t += squish / (steps - 1)) {
+        midArr.push_back(static_cast<double>(numPop) / (1 + std::exp(-t)));
+    }
+
+    double minMidArr = *std::min_element(midArr.begin(), midArr.end());
+    double maxMidArr = *std::max_element(midArr.begin(), midArr.end());
+    double m = (numPop - 1) / (maxMidArr - minMidArr);
+
+    std::vector<int> iArr;
+    for (double t : midArr) {
+        int index = static_cast<int>(m * (t - minMidArr));
+        iArr.push_back(index);
+    }
+
+    iArr[0] = 0;
+    iArr.back() = numPop - 1;
+
+    // List of points as a sample of bezier
+    std::vector<units::CartesianPosition::type> pl;
+    for (int index : iArr) {
+        pl.push_back(cp_type(plPop[index]));
+    }
+
+    for (const auto& waypoint : pl) {
+        waypoints.push_back(waypoint);
+
+        // Move to the waypoint
+        wam.moveTo(waypoint, true, 0.05);
+    }
+
+    return waypoints;
+}
+*/
 template <size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
@@ -261,11 +329,11 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     
     
 
-    f_d = 1.0;
+    //double f_d = 1.0;
     Eigen::MatrixXd I(3, 3);
     I.setIdentity();
     cf_type u_cf; 
-    u_cf = surface_estimator.p.inverse()*(I-s)*surface_estimator.p*(f_d - forceEstimator.computedF);
+    //u_cf = surface_estimator.p.inverse()*(I-s)*surface_estimator.p*(f_d - forceEstimator.computedF);
     std::cout << "Estimated F:" << forceEstimator.computedF << std::endl;
     std::cout << p_test << std::endl;
 

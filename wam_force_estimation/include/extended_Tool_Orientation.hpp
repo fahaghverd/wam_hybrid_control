@@ -2,8 +2,8 @@
 
 #include <iostream>
 
-#include <Eigen/Core>
-#include <Eigen/Geometry>
+#include <eigen3/Eigen/Core>
+#include <eigen3/Eigen/Geometry>
 #include <gsl/gsl_matrix.h>
 
 #include <barrett/detail/ca_macro.h>
