@@ -55,6 +55,7 @@ protected:
         // Taking force and position values from the input
         p2 = this->cfInput.getValue();
         p2n = p2.normalized();
+        p2n = -1*p2n;
 
         if (p2.norm() > 15) {
             if (contacted_first_time) {
@@ -66,20 +67,22 @@ protected:
             cps.col(1) = this->cpInput.getValue();
             p1 = cps.col(1) - cps.col(0);
             p1n = p1.normalized();
+            
 
             if (p1.norm() > 0.05) {
                 cps.col(0) = this->cpInput.getValue();
                 R = this->rotInput.getValue();
             
                 p2 = R * p2n;  // Transforming from world to tool
+                p1 = R * p1n;
 
                 p3 = p1n.cross(p2);
 
-                p.col(0) = p1n;
+                p.col(0) = p1;
                 p.col(1) = p3;
                 p.col(2) = p2;
 
-                P1Value->setData(&p1n);
+                P1Value->setData(&p1);
                 P2Value->setData(&p3);
                 P3Value->setData(&p2);
             }

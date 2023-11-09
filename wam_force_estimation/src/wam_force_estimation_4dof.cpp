@@ -41,7 +41,7 @@
 using namespace barrett;
 using namespace systems;
 
-
+/*
 // Function to generate waypoints along a cubic spline and move to them
 template <size_t DOF>
 std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
@@ -75,8 +75,8 @@ std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
 
     return waypoints;
 }
+*/
 
-/*
 template <size_t DOF>
 std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
     Wam<DOF>& wam,
@@ -142,7 +142,7 @@ std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
 
     return waypoints;
 }
-*/
+
 template <size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
@@ -325,7 +325,8 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
 		0, 0, 0;
 	test_pose << 0.7060848991017444, 0.119945, 0.4;
 	p_test = wam.getToolOrientation()*surface_estimator.p.inverse()*s*surface_estimator.p*wam.getToolOrientation().inverse()*test_pose;
-	std::vector<cp_type> waypoints3 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), p_test, 0.05);
+	//std::vector<cp_type> waypoints3 = generateCubicSplineWaypointsAndMove(wam, wam.getToolPosition(), p_test, 0.05);
+    std::cout<<surface_estimator.p*wam.getToolOrientation().inverse()<<std::endl;
     
     
 
