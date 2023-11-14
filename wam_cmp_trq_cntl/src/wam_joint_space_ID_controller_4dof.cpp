@@ -383,6 +383,7 @@ int wam_main(int argc, char** argv, ProductManager& pm,	systems::Wam<DOF>& wam) 
 	std::remove(tmpFile);
 	outputFile.close();
 
+	
 	waitForEnter();
 	wam.moveHome();
 	return 0;

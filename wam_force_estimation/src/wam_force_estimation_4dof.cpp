@@ -76,7 +76,7 @@ std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
     return waypoints;
 }
 */
-
+// Function to generate waypoints along a Cubic Bezier curve and move to them
 template <size_t DOF>
 std::vector<units::CartesianPosition::type> generateCubicSplineWaypointsAndMove(
     Wam<DOF>& wam,
@@ -235,7 +235,7 @@ int wam_main(int argc, char** argv, ProductManager& pm, Wam<DOF>& wam) {
 
     // Zero Acc
     // connect(zero.output, forceEstimator.jaInput);
-
+    
     connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
     connect(getWAMJacobian.output, forceEstimator.Jacobian);
 
