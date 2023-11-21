@@ -56,7 +56,7 @@
 #include <fcntl.h>
 #include <termios.h>
 
-//#include "planar_surface_hybrid_control/impedence_controller.h"
+#include "planar_surface_hybrid_control/impedence_controller.h"
 #include "planar_surface_hybrid_control/static_force_estimator_withg.h"
 #include "planar_surface_hybrid_control/get_jacobian_system.h"
 
@@ -103,7 +103,7 @@ class PlanarHybridControl
     protected:
         typedef boost::tuple<double, cp_type, jp_type> config_sample_type;
 		typedef boost::tuple<double, cp_type> cp_sample_type;
-        cp_type surface_normal;
+        cp_type surface_normal, initial_point;
 		cf_type forceNorm;
 		jp_type jp_home;
 		jp_type jp_cmd;
@@ -143,6 +143,20 @@ class PlanarHybridControl
 		StaticForceEstimatorwithG<DOF> staticForceEstimator;
 		getJacobian<DOF> getWAMJacobian;
 		systems::GravityCompensator<DOF> gravityTerm;
+
+		//Impedance Control
+		systems::ImpedanceController6DOF<DOF> ImpControl;
+		systems::ExposedOutput<cp_type> KxSet;
+		systems::ExposedOutput<cp_type> DxSet;
+		systems::ExposedOutput<cp_type> XdSet;
+		systems::ExposedOutput<cp_type> OrnKxSet;
+		systems::ExposedOutput<cp_type> OrnDxSet;
+		systems::ExposedOutput<Eigen::Quaterniond> OrnXdSet;
+		systems::ExposedOutput<cp_type> KthSet;
+		systems::ExposedOutput<cp_type> ThetadSet;
+		systems::ToolForceToJointTorques<DOF> toolforce2jt;
+		systems::Summer<jt_type> torqueSum;
+		systems::ToolTorqueToJointTorques<DOF> tt2jt_ortn_split;
 
     public:
 		ros::NodeHandle n_; // WAM specific nodehandle

@@ -67,5 +67,6 @@
         "bit": "cpp",
         "*.ipp": "cpp",
         "*.h++": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "/home/funzi/catkin_workspace/src/wam_hybrid_control/planar_surface_hybrid_control"
 }

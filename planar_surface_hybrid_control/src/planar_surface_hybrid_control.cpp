@@ -45,6 +45,7 @@ void PlanarHybridControl<DOF>::init(ProductManager& pm)
     surface_calibrartion_srv = n_.advertiseService("surface_calibrartion", &PlanarHybridControl<DOF>::calibration, this);
     collect_cp_trajectory_srv = n_.advertiseService("collect_cp_trajectory", &PlanarHybridControl<DOF>::collectCpTrajectory, this);
     planar_surface_hybrid_control_srv = n_.advertiseService("planar_surface_hybrid_control", &PlanarHybridControl<DOF>::HybridCartImpForceCOntroller, this);
+    
     //ros publishers
     wam_joint_state_pub = n_.advertise < sensor_msgs::JointState > ("joint_states", 1);
     wam_pose_pub = n_.advertise < geometry_msgs::PoseStamped > ("pose", 1);
@@ -75,6 +76,7 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
     std::cout<< "Move the robot to the first contact point and Press [Enter]."<<std::endl;
     waitForEnter();
     v1 = wam.getToolPosition();
+    initial_point = v1;
     {   
         // Make sure the Systems are connected on the same execution cycle
         // that the time is started. Otherwise we might record a bunch of
@@ -174,7 +176,7 @@ bool PlanarHybridControl<DOF>::collectCpTrajectory(wam_srvs::Teach::Request &req
 //matirx, like if its drawing z on the wall, should be able to draw it on the table as well.
 template<size_t DOF>
 bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res){
-
+    //disconnectSystems();
     //Extracting cartesian trajectory from collected trajectory.
     std::string path = "/home/catkin_workspace/src/wam_hybrid_control/.data/" + req.path;
     log::Reader<config_sample_type> lr(path.c_str());
@@ -199,8 +201,67 @@ bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Requ
     systems::connect(gravityTerm.output, staticForceEstimator.g);
 
     systems::connect(wam.jtSum.output, staticForceEstimator.jtInput);
+   
+    //Impedance Control
+    jt_type jtLimits(30.0);
+    cp_type cp_cmd, KpApplied, KdApplied;
+    KpApplied << 300, 250, 200;
+    KdApplied << 50, 50, 50;
 
-    //
+    KxSet.setValue(KpApplied);
+    DxSet.setValue(KdApplied);
+    XdSet.setValue(wam.getToolPosition());
+    OrnKxSet.setValue(cp_type(0.0, 0.0, 0.0));
+    OrnDxSet.setValue(cp_type(0.0, 0.0, 0.0));
+    OrnXdSet.setValue(wam.getToolOrientation());
+
+    // CONNECT SPRING SYSTEM
+    systems::forceConnect(KxSet.output, ImpControl.KxInput);
+    systems::forceConnect(DxSet.output, ImpControl.DxInput);
+    systems::forceConnect(XdSet.output, ImpControl.XdInput);
+
+    systems::forceConnect(OrnKxSet.output, ImpControl.OrnKpGains);
+    systems::forceConnect(OrnDxSet.output, ImpControl.OrnKdGains);
+    systems::forceConnect(OrnXdSet.output, ImpControl.OrnReferenceInput);
+    systems::forceConnect(wam.toolOrientation.output, ImpControl.OrnFeedbackInput);
+
+    systems::forceConnect(wam.toolPosition.output, ImpControl.CpInput);
+    systems::forceConnect(wam.toolVelocity.output, ImpControl.CvInput);
+    systems::forceConnect(wam.kinematicsBase.kinOutput, ImpControl.kinInput);
+
+    systems::forceConnect(wam.kinematicsBase.kinOutput, toolforce2jt.kinInput);
+    //systems::forceConnect(wam.kinematicsBase.kinOutput, tooltorque2jt.kinInput);
+    systems::forceConnect(wam.kinematicsBase.kinOutput, tt2jt_ortn_split.kinInput); // how tt2jt_ortn_split is different from tooltorque2jt??
+
+    systems::forceConnect(ImpControl.CFOutput, toolforce2jt.input);
+    systems::forceConnect(ImpControl.CTOutput, tt2jt_ortn_split.input);
+
+    // CONNECT TO SUMMER
+    systems::forceConnect(toolforce2jt.output, torqueSum.getInput(0));
+    systems::forceConnect(tt2jt_ortn_split.output, torqueSum.getInput(1));
+
+    // SATURATE AND CONNECT TO WAM INPUT
+    systems::forceConnect(torqueSum.output, jtSat.input);        
+    systems::forceConnect(jtSat.output, wam.input); 
+    
+    cp_type projected_waypoint;
+    for (const auto& waypoint : cp_trj) {
+        // Calculate the vector from the point on the plane to the given point
+        cp_type PQ = waypoint - initial_point;
+
+        // Calculate the projection of PQ onto the plane's normal vector
+        double projectionScalar = PQ.dot(surface_normal) / surface_normal.squaredNorm();
+        cp_type projection = projectionScalar * surface_normal;
+
+        // Move to the waypoint
+        projected_waypoint = waypoint - projection;
+        XdSet.setValue(projected_waypoint);
+        btsleep(0.5);
+        cp_type e = (projected_waypoint - wam.getToolPosition())/(projected_waypoint.norm());
+        if(e.norm() > 0.05) {std::cout<<e<<std::endl;}   
+    }
+
+    systems::disconnect(torqueSum.output);
 
     return true;
 }
@@ -219,6 +280,23 @@ bool PlanarHybridControl<DOF>::go_home_callback(std_srvs::Empty::Request &req, s
     jp_home[3] += 0.3;
     wam.moveTo(jp_home, true);
     locked_joints = true;
+    return true;
+}
+
+//Function to command a joint space move to the WAM with blocking specified
+template<size_t DOF>
+bool PlanarHybridControl<DOF>::joint_move_block_callback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res)
+{
+    if (req.joints.size() != DOF) {
+        ROS_INFO("Request Failed: %zu-DOF request received, must be %zu-DOF", req.joints.size(), DOF);
+        return false;
+    }
+    ROS_INFO("Moving Robot to Commanded Joint Pose");
+    for (size_t i = 0; i < DOF; i++) {
+        jp_cmd[i] = req.joints[i];
+    }
+    bool b = req.blocking;
+    wam.moveTo(jp_cmd, b);
     return true;
 }
 
