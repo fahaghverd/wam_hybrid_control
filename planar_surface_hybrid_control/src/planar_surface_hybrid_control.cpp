@@ -68,10 +68,19 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
     systems::Ramp time(mypm->getExecutionManager());
     systems::TupleGrouper<double, cp_type, jp_type> configLogTg;
     const double T_s = mypm->getExecutionManager()->getPeriod();
-    std::string path = "/home/catkin_workspace/src/wam_hybrid_control/.data/" + req.path;
+
+    char tmpFile[] = "/tmp/btXXXXXX";
+	if (mkstemp(tmpFile) == -1) {
+		printf("ERROR: Couldn't create temporary file!\n");
+		return 1;
+	}
+
+    std::string path = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path;
 
     // Record at 1/10th of the loop rate
-    systems::PeriodicDataLogger<config_sample_type> configLogger(mypm->getExecutionManager(), new barrett::log::RealTimeWriter<config_sample_type>(path.c_str(), 10*T_s), 10);
+    systems::PeriodicDataLogger<config_sample_type> configLogger(mypm->getExecutionManager(),
+        new barrett::log::RealTimeWriter<config_sample_type>(tmpFile, 10*T_s),
+        10);
 
     std::cout<< "Move the robot to the first contact point and Press [Enter]."<<std::endl;
     waitForEnter();
@@ -101,12 +110,34 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
     configLogger.closeLog();
     disconnect(configLogger.input);
 
+    std::ofstream outputFile(path);
+
+    if (!outputFile.is_open()) {
+        printf("ERROR: Couldn't create the file!\n");
+        return 1;
+    }
+    log::Reader<config_sample_type> lr(tmpFile);
+	lr.exportCSV(outputFile);
+
     surface_normal = ((v2-v1).cross(v3-v2));
     surface_normal.normalize();
     std::cout<<"Surface normal: "<< surface_normal << std::endl;   
+    
+    std::cout<< "Calibration finished. Press [Enter] to go home."<<std::endl;
+    ROS_INFO("Returning to Home Position");
+    for (size_t i = 0; i < DOF; i++) {
+        jp_cmd[i] = 0.0;
+    }
+    wam.moveTo(jp_cmd, true);
+    jp_home[3] -= 0.3;
+    wam.moveTo(jp_home, true);
+    jp_home[3] += 0.3;
+    wam.moveTo(jp_home, true);
+    wam.idle();
 
     return true;
 }
+
 
 /*// Templated Function to find linearly independent vectors in the collected trajectory.
 template<size_t DOF>
@@ -145,12 +176,14 @@ bool PlanarHybridControl<DOF>::collectCpTrajectory(wam_srvs::Teach::Request &req
     systems::Ramp time(mypm->getExecutionManager());
     systems::TupleGrouper<double, cp_type> cpLogTg;
     const double T_s = mypm->getExecutionManager()->getPeriod();
-    std::string path = "/home/catkin_workspace/src/wam_hybrid_control/.data/" + req.path;
+    std::string path = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path;
     ROS_INFO_STREAM("Collecting cartesian trajectory. Saving to: " << path);
+    
     // Record at 1/10th of the loop rate
     systems::PeriodicDataLogger<cp_sample_type> cpLogger(mypm->getExecutionManager(), new barrett::log::RealTimeWriter<cp_sample_type>(path.c_str(), 10*T_s), 10);
     printf("Press [Enter] to start collecting.\n");
     waitForEnter();
+    initial_point = wam.getToolPosition();;
     {
         // Make sure the Systems are connected on the same execution cycle
         // that the time is started. Otherwise we might record a bunch of
@@ -170,6 +203,7 @@ bool PlanarHybridControl<DOF>::collectCpTrajectory(wam_srvs::Teach::Request &req
     return true;
 }
 
+
 // Hybrid force + impedance cp_position controller
 //Lets play the collected trajectory as the trajectory! We cal also try collecting when not in contaact
 //and then it projects. Also, we can reshape the trajectory based on the initial point and the projection
@@ -178,7 +212,7 @@ template<size_t DOF>
 bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res){
     //disconnectSystems();
     //Extracting cartesian trajectory from collected trajectory.
-    std::string path = "/home/catkin_workspace/src/wam_hybrid_control/.data/" + req.path;
+    std::string path = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path;
     log::Reader<config_sample_type> lr(path.c_str());
     std::vector<config_sample_type> vec;
 
@@ -194,13 +228,13 @@ bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Requ
     }
     
     //Force estimation
-    systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
-    systems::connect(getWAMJacobian.output, staticForceEstimator.Jacobian);
+    // systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
+    // systems::connect(getWAMJacobian.output, staticForceEstimator.Jacobian);
 
-    systems::connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
-    systems::connect(gravityTerm.output, staticForceEstimator.g);
+    //systems::connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
+    //systems::connect(gravityTerm.output, staticForceEstimator.g);
 
-    systems::connect(wam.jtSum.output, staticForceEstimator.jtInput);
+    //systems::connect(wam.jtSum.output, staticForceEstimator.jtInput);
    
     //Impedance Control
     jt_type jtLimits(30.0);
@@ -243,21 +277,28 @@ bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Requ
     // SATURATE AND CONNECT TO WAM INPUT
     systems::forceConnect(torqueSum.output, jtSat.input);        
     systems::forceConnect(jtSat.output, wam.input); 
-    
+    std::cout<< surface_normal <<std::endl;
+    std::cout<< initial_point <<std::endl;
     cp_type projected_waypoint;
     for (const auto& waypoint : cp_trj) {
         // Calculate the vector from the point on the plane to the given point
-        cp_type PQ = waypoint - initial_point;
+        cp_type PQ;
+        PQ = waypoint - initial_point;
+        
 
         // Calculate the projection of PQ onto the plane's normal vector
-        double projectionScalar = PQ.dot(surface_normal) / surface_normal.squaredNorm();
-        cp_type projection = projectionScalar * surface_normal;
+        double projectionScalar;
+        projectionScalar = PQ.dot(surface_normal) / surface_normal.squaredNorm();
+        cp_type projection;
+        projection = projectionScalar * surface_normal;
 
         // Move to the waypoint
         projected_waypoint = waypoint - projection;
-        XdSet.setValue(projected_waypoint);
+        //XdSet.setValue(projected_waypoint);
         btsleep(0.5);
         cp_type e = (projected_waypoint - wam.getToolPosition())/(projected_waypoint.norm());
+        std::cout<< waypoint <<std::endl;
+        std::cout<< projected_waypoint <<std::endl;
         if(e.norm() > 0.05) {std::cout<<e<<std::endl;}   
     }
 
@@ -265,6 +306,7 @@ bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Requ
 
     return true;
 }
+
 
 // goHome Function for sending the WAM safely back to its home starting position.
 template<size_t DOF>
@@ -303,27 +345,26 @@ bool PlanarHybridControl<DOF>::joint_move_block_callback(wam_srvs::JointMoveBloc
 //Function to update the WAM publisher
 template<size_t DOF>
 void PlanarHybridControl<DOF>::publish_wam(ProductManager& pm)
-{
-    //Current values to be published
+{   //Current values to be published
     jp_type jp = wam.getJointPositions();
     jt_type jt = wam.getJointTorques();
     jv_type jv = wam.getJointVelocities();
     cp_type cp_pub = wam.getToolPosition();
-    cv_type cv_pub = wam.getToolVelocity();
-    cv_type cv_ang;
-    cv_ang << cv_pub[3], cv_pub[4], cv_pub[5];
-    // std::cout << cv_ang[0] << " " << cv_ang[1] << " " << cv_ang[2] << std::endl;
     Eigen::Quaterniond to_pub = wam.getToolOrientation();
     math::Matrix<6,DOF> robot_tool_jacobian=wam.getToolJacobian();
+
+    cv_type cv_pub = wam.getToolVelocity();
+    cv_type cv_ang = wam.getToolAngularVelocity();
+
     //publishing sensor_msgs/JointState to wam/joint_states
-    for (size_t i = 0; i < DOF; i++)
-    {
+    for (size_t i = 0; i < DOF; i++) {
         wam_joint_state.position[i] = jp[i];
         wam_joint_state.velocity[i] = jv[i];
         wam_joint_state.effort[i] = jt[i];
     }
     wam_joint_state.header.stamp = ros::Time::now();
     wam_joint_state_pub.publish(wam_joint_state);
+
     //publishing geometry_msgs/PoseStamed to wam/pose
     wam_pose.header.stamp = ros::Time::now();
     wam_pose.pose.position.x = cp_pub[0];
@@ -334,10 +375,10 @@ void PlanarHybridControl<DOF>::publish_wam(ProductManager& pm)
     wam_pose.pose.orientation.y = to_pub.y();
     wam_pose.pose.orientation.z = to_pub.z();
     wam_pose_pub.publish(wam_pose);
+
     //publishing wam_msgs/MatrixMN to wam/jacobian
     wam_jacobian_mn.m = 6;
     wam_jacobian_mn.n = DOF;
-    //size_t index_loop=0;
     for (size_t h = 0; h < wam_jacobian_mn.n; ++h) {
         for (size_t k = 0; k < wam_jacobian_mn.m; ++k) {
             wam_jacobian_mn.data[h*6+k]=robot_tool_jacobian(k,h);
@@ -345,12 +386,14 @@ void PlanarHybridControl<DOF>::publish_wam(ProductManager& pm)
     }
     wam_jacobian_mn_pub.publish(wam_jacobian_mn);
 
+    //publish tool info to /wam/tool_info
     for (size_t j = 0; j < 3; j++) {
         wam_tool_info.position[j] = cp_pub[j];
         wam_tool_info.velocity[j] = cv_pub[j];
     }
     wam_tool_pub.publish(wam_tool_info);
 
+    //publish static force estimation to /wam/static_estimated_force
     force_msg.force[0] = staticForceEstimator.computedF[0];
     force_msg.force[1] = staticForceEstimator.computedF[1];
     force_msg.force[2] = staticForceEstimator.computedF[2];
@@ -363,7 +406,6 @@ void PlanarHybridControl<DOF>::publish_wam(ProductManager& pm)
     
     wam_estimated_contact_force_pub.publish(force_msg);
     
-    
 }
 
 //wam_main Function
@@ -372,16 +414,19 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam)
 {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
     ros::init(argc, argv, "wam");
+    
     ros::NodeHandle n_;
     PlanarHybridControl<DOF> planar_hybrid_controller(wam, pm);
     planar_hybrid_controller.init(pm);
+    
     ROS_INFO_STREAM("wam node initialized");
     ros::Rate pub_rate(PUBLISH_FREQ);
-
+    
     while (ros::ok() && pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE) {
-        ros::spinOnce();
+        ros::spinOnce();       
         planar_hybrid_controller.publish_wam(pm);
         pub_rate.sleep();
+        
     }
     ROS_INFO_STREAM("wam node shutting down");
     return 0;

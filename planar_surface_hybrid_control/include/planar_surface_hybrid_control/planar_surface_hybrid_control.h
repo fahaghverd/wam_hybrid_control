@@ -108,6 +108,8 @@ class PlanarHybridControl
 		jp_type jp_home;
 		jp_type jp_cmd;
 
+		libconfig::Setting& setting;
+
 		bool locked_joints;
 
         systems::Wam<DOF>& wam;
@@ -161,7 +163,7 @@ class PlanarHybridControl
     public:
 		ros::NodeHandle n_; // WAM specific nodehandle
 		ProductManager* mypm;
-		libconfig::Setting& setting;
+		
 
         PlanarHybridControl(systems::Wam<DOF>& wam_, ProductManager& pm) :
 			n_("wam"),
