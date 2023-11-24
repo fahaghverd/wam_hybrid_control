@@ -38,6 +38,7 @@
 #include "wam_srvs/JointMoveBlock.h"
 #include "wam_srvs/Teach.h"
 #include "wam_srvs/Play.h"
+#include "wam_srvs/CP_ImpedanceControl.h"
 
 
 #include "ros/ros.h"
@@ -111,6 +112,8 @@ class PlanarHybridControl
 		libconfig::Setting& setting;
 
 		bool locked_joints;
+		bool systems_connected;		
+
 
         systems::Wam<DOF>& wam;
 
@@ -134,12 +137,14 @@ class PlanarHybridControl
 		ros::Publisher wam_estimated_contact_force_pub;
 
         // services
+		ros::ServiceServer disconnect_systems_srv;
 		// ros::ServiceServer gravity_srv;
 		ros::ServiceServer go_home_srv;
 		ros::ServiceServer joint_move_block_srv;
 		ros::ServiceServer surface_calibrartion_srv;
 		ros::ServiceServer collect_cp_trajectory_srv;
 		ros::ServiceServer planar_surface_hybrid_control_srv;
+		ros::ServiceServer cp_impedance_control_srv;
 
 		//Contace Force Estimation
 		StaticForceEstimatorwithG<DOF> staticForceEstimator;
@@ -159,6 +164,7 @@ class PlanarHybridControl
 		systems::ToolForceToJointTorques<DOF> toolforce2jt;
 		systems::Summer<jt_type> torqueSum;
 		systems::ToolTorqueToJointTorques<DOF> tt2jt_ortn_split;
+		
 
     public:
 		ros::NodeHandle n_; // WAM specific nodehandle
@@ -183,6 +189,10 @@ class PlanarHybridControl
         void publish_wam(ProductManager& pm);
 		void update_realtime(ProductManager& pm);
 		bool HybridCartImpForceCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res);
+		std::vector<units::CartesianPosition::type> generateCubicSplineWaypoints(const units::CartesianPosition::type& initialPos, const units::CartesianPosition::type& finalPos, double offset);
+		void disconnectSystems();
+		bool disconnectSystems(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
+		void go_home();
 		//void findLinearlyIndependentVectors(ProductManager& pm);
 
 
