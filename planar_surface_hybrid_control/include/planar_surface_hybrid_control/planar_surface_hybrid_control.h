@@ -13,6 +13,7 @@
 #include <math.h>
 #include <string>
 #include <sstream>
+#include <fstream>
 
 
 
@@ -110,6 +111,7 @@ class PlanarHybridControl
 		jp_type jp_cmd;
 
 		libconfig::Setting& setting;
+		libconfig::Config config;
 
 		bool locked_joints;
 		bool systems_connected;		
