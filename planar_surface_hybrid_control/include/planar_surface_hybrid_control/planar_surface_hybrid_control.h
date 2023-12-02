@@ -40,6 +40,8 @@
 #include "wam_srvs/Teach.h"
 #include "wam_srvs/Play.h"
 #include "wam_srvs/CP_ImpedanceControl.h"
+#include "wam_srvs/GridTestCalib.h"
+#include "wam_srvs/GridTest.h"
 
 
 #include "ros/ros.h"
@@ -105,7 +107,7 @@ class PlanarHybridControl
     protected:
         typedef boost::tuple<double, cp_type, jp_type> config_sample_type;
 		typedef boost::tuple<double, cp_type> cp_sample_type;
-        cp_type surface_normal, initial_point;
+        cp_type surface_normal, initial_point, p1, p2, p3, V1, V2;
 		cf_type forceNorm;
 		jp_type jp_home;
 		jp_type jp_cmd;
@@ -147,6 +149,8 @@ class PlanarHybridControl
 		ros::ServiceServer collect_cp_trajectory_srv;
 		ros::ServiceServer planar_surface_hybrid_control_srv;
 		ros::ServiceServer cp_impedance_control_srv;
+		ros::ServiceServer grid_test_calib_srv;
+		ros::ServiceServer grid_test_srv;
 
 		//Contace Force Estimation
 		StaticForceEstimatorwithG<DOF> staticForceEstimator;
@@ -195,6 +199,8 @@ class PlanarHybridControl
 		void disconnectSystems();
 		bool disconnectSystems(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
 		void go_home();
+		bool grid_test_calibration(wam_srvs::GridTestCalib::Request &req, wam_srvs::GridTestCalib::Response &res);
+		bool grid_test(wam_srvs::GridTest::Request &req, wam_srvs::GridTest::Response &res);
 		//void findLinearlyIndependentVectors(ProductManager& pm);
 
 
