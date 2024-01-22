@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="frame_id" default="world" />
+  <!-- Choose from: classic.launch, static_deadband.launch, no_deadband.launch -->
+  <arg name="spacenav_launch" default="static_deadband.launch" />
+
+  <!-- Whether to start rviz -->
+  <arg name="rviz" default="true" />
+  <arg name="config" default="$(find wam_affine_surface_teleop)/rviz/view.rviz" />
+
+  <node pkg="wam_affine_surface_teleop" type="spacemouse_teleop_rviz" name="spacemouse_teleop_rviz" >
+    <param name="frame_id" value="$(arg frame_id)" />
+  </node>
+
+  <include file="$(find spacenav_node)/launch/$(arg spacenav_launch)" />
+
+  <node name="rviz" pkg="rviz" type="rviz"
+      args="-d $(arg config)" if="$(arg rviz)" />
+</launch>

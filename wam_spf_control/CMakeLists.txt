@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0.2)
-project(planar_surface_hybrid_control)
+project(wam_spf_control)
 
 find_package(catkin REQUIRED COMPONENTS
   roscpp
@@ -58,7 +58,7 @@ catkin_package(
 
 
 add_executable(planar_surface_hybrid_control src/planar_surface_hybrid_control.cpp)
-add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(planar_surface_hybrid_control ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(
   planar_surface_hybrid_control
   barrett 

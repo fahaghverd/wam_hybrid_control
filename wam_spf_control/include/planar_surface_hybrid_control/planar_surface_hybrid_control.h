@@ -40,8 +40,6 @@
 #include "wam_srvs/Teach.h"
 #include "wam_srvs/Play.h"
 #include "wam_srvs/CP_ImpedanceControl.h"
-#include "wam_srvs/GridTestCalib.h"
-#include "wam_srvs/GridTest.h"
 
 
 #include "ros/ros.h"
@@ -118,6 +116,8 @@ class PlanarHybridControl
 		bool locked_joints;
 		bool systems_connected;		
 
+		bool force_estimated;
+		cf_type force_norm;
 
         systems::Wam<DOF>& wam;
 
@@ -126,7 +126,7 @@ class PlanarHybridControl
 
         ros::Duration msg_timeout;
 
-        // published topics
+        //published topics
 		sensor_msgs::JointState wam_joint_state;
 		geometry_msgs::PoseStamped wam_pose;
 		wam_msgs::MatrixMN wam_jacobian_mn;
@@ -156,6 +156,8 @@ class PlanarHybridControl
 		StaticForceEstimatorwithG<DOF> staticForceEstimator;
 		getJacobian<DOF> getWAMJacobian;
 		systems::GravityCompensator<DOF> gravityTerm;
+		std::ofstream outputFile; 
+		systems::PrintToStream<cf_type> print;
 
 		//Impedance Control
 		systems::ImpedanceController6DOF<DOF> ImpControl;
@@ -166,8 +168,9 @@ class PlanarHybridControl
 		systems::ExposedOutput<cp_type> OrnDxSet;
 		systems::ExposedOutput<Eigen::Quaterniond> OrnXdSet;
 		systems::ExposedOutput<cp_type> KthSet;
-		systems::ExposedOutput<cp_type> ThetadSet;
+		systems::ExposedOutput<cf_type> FeedFwdForce;
 		systems::ToolForceToJointTorques<DOF> toolforce2jt;
+		systems::ToolForceToJointTorques<DOF> toolforcefeedfwd2jt;
 		systems::Summer<jt_type> torqueSum;
 		systems::ToolTorqueToJointTorques<DOF> tt2jt_ortn_split;
 		
@@ -180,27 +183,28 @@ class PlanarHybridControl
         PlanarHybridControl(systems::Wam<DOF>& wam_, ProductManager& pm) :
 			n_("wam"),
 			wam(wam_),
-            jtLimits(35.0), 
+            jtLimits(20.0), 
 			jtSat(boost::bind(saturateJt<DOF>, _1, jtLimits)),
 			setting(pm.getConfig().lookup(pm.getWamDefaultConfigPath())),
-			gravityTerm(setting["gravity_compensation"]){}
+			gravityTerm(setting["gravity_compensation"]),
+			print(pm.getExecutionManager(),"Data: ", outputFile){}
 
         ~PlanarHybridControl(){}
 
 		void init(ProductManager& pm);
 		bool calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res);
 		bool collectCpTrajectory(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res);
-		bool go_home_callback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
-        bool joint_move_block_callback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res);
-        void publish_wam(ProductManager& pm);
-		void update_realtime(ProductManager& pm);
-		bool HybridCartImpForceCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res);
+		bool goHomeCallback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
+        bool jointMoveBlockCallback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res);
+        void publishWam(ProductManager& pm);
+		bool SPFCartImpCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res);
 		std::vector<units::CartesianPosition::type> generateCubicSplineWaypoints(const units::CartesianPosition::type& initialPos, const units::CartesianPosition::type& finalPos, double offset);
 		void disconnectSystems();
 		bool disconnectSystems(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
-		void go_home();
-		bool grid_test_calibration(wam_srvs::GridTestCalib::Request &req, wam_srvs::GridTestCalib::Response &res);
-		bool grid_test(wam_srvs::GridTest::Request &req, wam_srvs::GridTest::Response &res);
+		void goHome();
+		void CartImpController(std::vector<cp_type> &Trajectory, int step = 1, const cp_type &KpApplied = Eigen::Vector3d::Zero(), const cp_type &KdApplied = Eigen::Vector3d::Zero(),
+                                                 bool orientation_control = false, const cp_type &OrnKpApplied = Eigen::Vector3d::Zero(), const cp_type &OrnKdApplied = Eigen::Vector3d::Zero(),
+                                                 bool ext_force = false, const cf_type &des_force = Eigen::Vector3d::Zero(), bool null_space = false);         
 		//void findLinearlyIndependentVectors(ProductManager& pm);
 
 

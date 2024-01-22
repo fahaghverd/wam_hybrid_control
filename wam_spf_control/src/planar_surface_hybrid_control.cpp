@@ -16,11 +16,14 @@ void PlanarHybridControl<DOF>::init(ProductManager& pm){
     mypm = &pm;
     locked_joints = false;
     systems_connected = false;
+    force_estimated = false;
   
+    outputFile.open("home/output.txt");
     ROS_INFO("%zu-DOF WAM", DOF);
     jp_home = wam.getJointPositions();
     wam.gravityCompensate(true); // gravity compensation default set to true
-    
+    pm.getSafetyModule()->setVelocityLimit(1.5);
+
     // setting up WAM joint state publisher
     const char* wam_jnts[] = {  
         "wam/YawJoint",
@@ -39,14 +42,14 @@ void PlanarHybridControl<DOF>::init(ProductManager& pm){
     wam_jacobian_mn.data.resize(DOF*6);
 
     // ROS services
-    go_home_srv = n_.advertiseService("go_home", &PlanarHybridControl::go_home_callback, this);
-    joint_move_block_srv = n_.advertiseService("joint_move_block", &PlanarHybridControl::joint_move_block_callback, this);
+    go_home_srv = n_.advertiseService("go_home", &PlanarHybridControl::goHomeCallback, this);
+    joint_move_block_srv = n_.advertiseService("joint_move_block", &PlanarHybridControl::jointMoveBlockCallback, this);
     surface_calibrartion_srv = n_.advertiseService("surface_calibrartion", &PlanarHybridControl<DOF>::calibration, this);
     collect_cp_trajectory_srv = n_.advertiseService("collect_cp_trajectory", &PlanarHybridControl<DOF>::collectCpTrajectory, this);
-    planar_surface_hybrid_control_srv = n_.advertiseService("planar_surface_hybrid_control", &PlanarHybridControl<DOF>::HybridCartImpForceCOntroller, this);
+    planar_surface_hybrid_control_srv = n_.advertiseService("planar_surface_hybrid_control", &PlanarHybridControl<DOF>::SPFCartImpCOntroller, this);
     disconnect_systems_srv = n_.advertiseService("disconnect_systems", &PlanarHybridControl::disconnectSystems, this);
-    grid_test_calib_srv = n_.advertiseService("grid_test_calib", &PlanarHybridControl::grid_test_calibration, this);
-    grid_test_srv = n_.advertiseService("grid_test", &PlanarHybridControl::grid_test, this);
+    //grid_test_calib_srv = n_.advertiseService("grid_test_calib", &PlanarHybridControl::grid_test_calibration, this);
+    //grid_test_srv = n_.advertiseService("grid_test", &PlanarHybridControl::grid_test, this);
 
     // ROS publishers
     wam_joint_state_pub = n_.advertise < sensor_msgs::JointState > ("joint_states", 1);
@@ -58,7 +61,39 @@ void PlanarHybridControl<DOF>::init(ProductManager& pm){
     
     // ROS subscribers
     
-    ROS_INFO("wam services now advertised");
+    // CONNECT SPRING SYSTEM //TODO: check if its okay to connect here.
+    systems::forceConnect(KxSet.output, ImpControl.KxInput);
+    systems::forceConnect(DxSet.output, ImpControl.DxInput);
+    systems::forceConnect(XdSet.output, ImpControl.XdInput);
+
+    systems::forceConnect(OrnKxSet.output, ImpControl.OrnKpGains);
+    systems::forceConnect(OrnDxSet.output, ImpControl.OrnKdGains);
+    systems::forceConnect(OrnXdSet.output, ImpControl.OrnReferenceInput);
+    
+    systems::forceConnect(wam.toolPosition.output, ImpControl.CpInput);
+    systems::forceConnect(wam.toolVelocity.output, ImpControl.CvInput);
+    systems::forceConnect(wam.toolOrientation.output, ImpControl.OrnInput);
+
+    systems::forceConnect(wam.kinematicsBase.kinOutput, ImpControl.kinInput);
+    systems::forceConnect(wam.kinematicsBase.kinOutput, toolforce2jt.kinInput);
+    systems::forceConnect(wam.kinematicsBase.kinOutput, tt2jt_ortn_split.kinInput); 
+
+    systems::forceConnect(ImpControl.CFOutput, toolforce2jt.input);
+    systems::forceConnect(ImpControl.CTOutput, tt2jt_ortn_split.input);
+    systems::forceConnect(FeedFwdForce.output, toolforcefeedfwd2jt.input);
+
+    //Connect Force Estimation systems //TODO: Check the force topic.
+    systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
+    systems::connect(getWAMJacobian.output, staticForceEstimator.Jacobian);
+
+    systems::connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
+    systems::connect(gravityTerm.output, staticForceEstimator.g);
+
+    systems::connect(wam.jtSum.output, staticForceEstimator.jtInput);
+    systems::connect(staticForceEstimator.cartesianForceOutput, print.input);
+
+
+    ROS_INFO("WAM services now advertised");
     ros::AsyncSpinner spinner(0);
     spinner.start();
 }
@@ -130,7 +165,7 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
     
     ROS_INFO_STREAM("Calibration finished. Press [Enter] to go home.");
     waitForEnter();
-    go_home();
+    goHome();
 
     return true;
 }
@@ -227,23 +262,24 @@ bool PlanarHybridControl<DOF>::collectCpTrajectory(wam_srvs::Teach::Request &req
     // Finish the process
     ROS_INFO_STREAM("Collecting done. Press [Enter] to go home.");
     waitForEnter();
-    go_home();
+    goHome();
 
     return true;
 }
 
 
 
-// Hybrid force + impedance cp_position controller
-//Lets play the collected trajectory as the trajectory! We cal also try collecting when not in contaact
+// Impedance cp_position controller for surface path following
+//Lets play the collected trajectory as the trajectory! We can also try collecting when not in contaact
 //and then it projects. Also, we can reshape the trajectory based on the initial point and the projection
 //matirx, like if its drawing z on the wall, should be able to draw it on the table as well.
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res){
-    //disconnectSystems();
+bool PlanarHybridControl<DOF>::SPFCartImpCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res){
+    wam.idle(); //to disconnect hold joint torques!
+    
     surface_normal[0] = 0.0;
     surface_normal[1] = 0.0;
-    surface_normal[2] = -1.0;
+    surface_normal[2] = 1.0;
 
     //Extracting cartesian trajectory from collected trajectory.
     std::string path = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path;
@@ -253,7 +289,6 @@ bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Requ
         return false;
     }
  
-    // Read from the temporary file
     std::vector<cp_sample_type> vec;
     std::string line;
     while (std::getline(inputFile, line)) {
@@ -267,108 +302,33 @@ bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Requ
     // Extract cp_type values from vec
     std::vector<cp_type> cp_trj;
     for (const auto& record : vec) {
-        cp_trj.push_back(boost::get<1>(record)); // Assuming cp_type is at index 1
+        cp_trj.push_back(boost::get<1>(record));
     }
-    initial_point = cp_trj[0];
-    //initial_point[2] = initial_point[2]+0.015;
 
-    //Force estimation
-    // systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
-    // systems::connect(getWAMJacobian.output, staticForceEstimator.Jacobian);
+    initial_point = cp_trj[0]; //Initial contact point
 
-    //systems::connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
-    //systems::connect(gravityTerm.output, staticForceEstimator.g);
-
-    //systems::connect(wam.jtSum.output, staticForceEstimator.jtInput);
-   
-    //Impedance Control
-    jt_type jtLimits(35.0);
-    cp_type cp_cmd, KpApplied, KdApplied;
-    KpApplied << 300, 300, 300;
-    KdApplied << 40, 30, 30;
-
-    KxSet.setValue(KpApplied);
-    DxSet.setValue(KdApplied);
-    //XdSet.setValue(wam.getToolPosition());
-    OrnKxSet.setValue(cp_type(0.0, 0.0, 0.0));
-    OrnDxSet.setValue(cp_type(0.0, 0.0, 0.0));
-    OrnXdSet.setValue(wam.getToolOrientation());
-
-    // CONNECT SPRING SYSTEM
-    systems::forceConnect(KxSet.output, ImpControl.KxInput);
-    systems::forceConnect(DxSet.output, ImpControl.DxInput);
-    systems::forceConnect(XdSet.output, ImpControl.XdInput);
-
-    systems::forceConnect(OrnKxSet.output, ImpControl.OrnKpGains);
-    systems::forceConnect(OrnDxSet.output, ImpControl.OrnKdGains);
-    systems::forceConnect(OrnXdSet.output, ImpControl.OrnReferenceInput);
-    systems::forceConnect(wam.toolOrientation.output, ImpControl.OrnFeedbackInput);
-
-    systems::forceConnect(wam.toolPosition.output, ImpControl.CpInput);
-    systems::forceConnect(wam.toolVelocity.output, ImpControl.CvInput);
-    systems::forceConnect(wam.kinematicsBase.kinOutput, ImpControl.kinInput);
-
-    systems::forceConnect(wam.kinematicsBase.kinOutput, toolforce2jt.kinInput);
-    //systems::forceConnect(wam.kinematicsBase.kinOutput, tooltorque2jt.kinInput);
-    systems::forceConnect(wam.kinematicsBase.kinOutput, tt2jt_ortn_split.kinInput); // how tt2jt_ortn_split is different from tooltorque2jt??
-
-    systems::forceConnect(ImpControl.CFOutput, toolforce2jt.input);
-    systems::forceConnect(ImpControl.CTOutput, tt2jt_ortn_split.input);
-
-    // CONNECT TO SUMMER
-    systems::forceConnect(toolforce2jt.output, torqueSum.getInput(0));
-    systems::forceConnect(tt2jt_ortn_split.output, torqueSum.getInput(1));
-
-    // SATURATE AND CONNECT TO WAM INPUT
-    systems::forceConnect(torqueSum.output, jtSat.input);        
-    systems::forceConnect(jtSat.output, wam.input); 
+    //Impedance Control params
+    cp_type KpApplied, KdApplied;
+    KpApplied << 100, 100, 100;
+    KdApplied << 20, 20, 20;
     
-    wam.idle();
-    std::vector<units::CartesianPosition::type> waypoints = generateCubicSplineWaypoints(wam.getToolPosition(), initial_point, 0.01);
-    std::cout<<"initial_point"<<initial_point<<std::endl;
-    for (const auto& waypoint : waypoints) {
-        // Move to the waypoint
-        XdSet.setValue(waypoint);
-        btsleep(0.5);
-        cp_type e = (waypoint - wam.getToolPosition())/(waypoint.norm());
-        if(e.norm() > 0.05) {std::cout<<e<<std::endl;}   
-    }
+    //Moving to initial point
+    std::vector<units::CartesianPosition::type> waypoints = generateCubicSplineWaypoints(wam.getToolPosition(), initial_point, 0.0);
+    //std::cout<<"initial_point:"<<initial_point<<std::endl;
+    CartImpController(waypoints, 1, KpApplied, KdApplied); //TODO Try if the function works.
 
+    //Impedance Control params
     cp_type OrnKpApplied, OrnKdApplied;
-    OrnKpApplied << 0, 0, 100;
-    OrnKdApplied << 0, 0, 10;
-
-    OrnKxSet.setValue(OrnKpApplied);
-    OrnDxSet.setValue(OrnKdApplied);
-
-    Eigen::Matrix3d Rotation = wam.getToolOrientation().toRotationMatrix();
-    Rotation.col(2) << 0, 0, -1;
-
-    // Ensure the resulting matrix is still a valid rotation matrix
-    Eigen::JacobiSVD<Eigen::MatrixXd> svd(Rotation, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    Eigen::Matrix3d Rotation_des = svd.matrixU() * svd.matrixV().transpose();
-
-    // Check if the determinant is 1 to ensure it's a rotation matrix
-    if (Rotation_des.determinant() < 0) {
-        // If the determinant is -1, flip the sign of one of the singular vectors
-        Eigen::Matrix3d flipMatrix = Eigen::Matrix3d::Identity();
-        flipMatrix(2, 2) = -1;
-        Rotation_des = svd.matrixU() * flipMatrix * svd.matrixV().transpose();
-    }
-
-    std::cout<<Rotation_des<<std::endl;
-    Eigen::Quaterniond quaternion_des(Rotation_des);
-    OrnXdSet.setValue(quaternion_des);
-
-    // Convert Quaternion to Rotation Matrix
-    cp_type euler_angles_d = Rotation_des.eulerAngles(2, 1, 0);
-
-    int iterationCount = 0;
+    OrnKpApplied << 10, 10, 10;
+    OrnKdApplied << 6, 6, 6;
+    
     cp_type projected_waypoint;
+    cp_type waypoint;
+    std::vector<cp_type> projected_waypoints;
+    size_t iteration_count = 0;
     for (int i = 40; i<cp_trj.size(); i+=5) {
-        cp_type waypoint = cp_trj[i];
+        waypoint = cp_trj[i];
 
-        std::cout<<i<<std::endl;
         // Calculate the vector from the point on the plane to the given point
         cp_type PQ;
         PQ = waypoint - initial_point;
@@ -377,28 +337,102 @@ bool PlanarHybridControl<DOF>::HybridCartImpForceCOntroller(wam_srvs::Play::Requ
         double projectionScalar;
         projectionScalar = PQ.dot(surface_normal) / surface_normal.squaredNorm();
         cp_type projection;
-        projection = projectionScalar * surface_normal;
-
-        // Move to the waypoint
+        projection = projectionScalar * surface_normal;      
         projected_waypoint = waypoint - projection;
-        XdSet.setValue(projected_waypoint);
-        btsleep(0.5);
-        cp_type e = (projected_waypoint - wam.getToolPosition())/(projected_waypoint.norm());
+        projected_waypoints[iteration_count] = projected_waypoint;
+        iteration_count += 1;
 
-        // Convert Quaternion to Rotation Matrix
-        cp_type euler_angles = wam.getToolOrientation().toRotationMatrix().eulerAngles(2, 1, 0);
-
-        cp_type Orne = (euler_angles_d - euler_angles)/(euler_angles_d.norm());
-        //std::cout<< "waypoint:" << waypoint <<std::endl;
-        //std::cout<< "projected_waypoint" << projected_waypoint <<std::endl;
-        if(e.norm() > 0.05) {std::cout<<"position error: %"<<e*100<<std::endl;}   
-        if(Orne.norm() > 0.05) {std::cout << "orientation error(zyx):"<<Orne* 180.0 / M_PI<< std::endl;
-} 
+        /*projected_waypoint = b_rot_t * t_rot_s * S * s_rot_t * t_rot_b * waypoint*/ //Todo: check this, also check hybrid mode!
     }
 
-    systems::disconnect(torqueSum.output);
+    CartImpController(projected_waypoints, 5, KpApplied, KdApplied, true, OrnKpApplied, OrnKdApplied); // TODO: check the orientation control in the lopp.
 
+    cf_type force_des_surface; 
+    force_des_surface << 0.0, 0.0, -3.0;
+    //Todo: Find rotation from surface to base, and check this.
+    //force_des_body = b_rot_t * t_rot_s * S * force_des_surface;
+    //CartImpController(projected_waypoints, 5, KpApplied, KdApplied, true, OrnKpApplied, OrnKdApplied, true, des_froce);
+
+    
     return true;
+}
+
+template<size_t DOF>
+void PlanarHybridControl<DOF>::CartImpController(std::vector<cp_type> &Trajectory, int step, const cp_type &KpApplied, const cp_type &KdApplied,
+                                                 bool orientation_control, const cp_type &OrnKpApplied, const cp_type &OrnKdApplied,
+                                                 bool ext_force, const cf_type &des_force, bool null_space){
+    //Impedance Control params
+    KxSet.setValue(KpApplied);
+    DxSet.setValue(KdApplied);
+    OrnKxSet.setValue(OrnKpApplied);
+    OrnDxSet.setValue(OrnKdApplied);
+    FeedFwdForce.setValue(des_force);
+
+    // CONNECT TO SUMMER
+    systems::forceConnect(toolforce2jt.output, torqueSum.getInput(0));
+    systems::forceConnect(tt2jt_ortn_split.output, torqueSum.getInput(1));
+    if(ext_force){systems::forceConnect(toolforcefeedfwd2jt.output, torqueSum.getInput(2));}
+
+    /* tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) - this->jacobian_.transpose() * jacobian_transpose_pinv) *
+                         (this->nullspace_stiffness_ * (this->q_d_nullspace_ - this->q_) - this->nullspace_damping_ * this->dq_);*/
+
+    // SATURATE AND CONNECT TO WAM INPUT
+    systems::forceConnect(torqueSum.output, jtSat.input);        
+    systems::forceConnect(jtSat.output, wam.input); 
+
+    cp_type waypoint;
+    if(orientation_control){
+        Eigen::Matrix3d Rotation;
+        for (int i = 0; i<Trajectory.size(); i+=step) {
+            // Find the desired rotation
+            Rotation = wam.getToolOrientation().toRotationMatrix();
+            Rotation.col(2) << surface_normal;
+            
+            // Ensure the resulting matrix is still a valid rotation matrix
+            Eigen::JacobiSVD<Eigen::MatrixXd> svd(Rotation, Eigen::ComputeFullU | Eigen::ComputeFullV);
+            Eigen::Matrix3d Rotation_des = svd.matrixU() * svd.matrixV().transpose();
+            std::cout<<Rotation<<std::endl;
+            // Check if the determinant is 1 to ensure it's a rotation matrix
+            if (Rotation_des.determinant() < 0) {
+                // If the determinant is -1, flip the sign of one of the singular vectors
+                Eigen::Matrix3d flipMatrix = Eigen::Matrix3d::Identity();
+                flipMatrix(2, 2) = -1;
+                Rotation_des = svd.matrixU() * flipMatrix * svd.matrixV().transpose();
+            }
+
+            // Convert Quaternion to Rotation Matrix
+            std::cout << "Rotation_des:" << Rotation_des << std::endl;
+            Eigen::Quaterniond quaternion_des(Rotation_des);
+            OrnXdSet.setValue(quaternion_des);
+            
+            // Move to the waypoint
+            waypoint = Trajectory[i];
+            std::cout<<i<<std::endl;
+            XdSet.setValue(waypoint);
+            btsleep(0.5);
+
+            cp_type e = (waypoint - wam.getToolPosition())/(waypoint.norm());
+            
+            cp_type euler_angles = wam.getToolOrientation().toRotationMatrix().eulerAngles(2, 1, 0);
+            cp_type euler_angles_d = Rotation_des.eulerAngles(2, 1, 0);
+            cp_type Orne = (euler_angles_d - euler_angles)/(euler_angles_d.norm());
+            
+            if(e.norm() > 0.03) {std::cout<<"position error: %"<<e*100<<std::endl;}   
+            if(Orne.norm() > 0.03) {std::cout << "orientation error(zyx):"<<Orne* 180.0 / M_PI<< std::endl;}
+        }
+    }
+    else{
+        OrnXdSet.setValue(wam.getToolOrientation());
+        for (int i = 0; i<Trajectory.size(); i+=step) {
+            // Move to the waypoint
+            waypoint = Trajectory[i];
+            XdSet.setValue(waypoint);
+            btsleep(0.3);
+            cp_type e = (waypoint - wam.getToolPosition())/(waypoint.norm());
+            if(e.norm() > 0.03) {std::cout<<e<<std::endl;}   
+        }
+    }
+    systems::disconnect(torqueSum.output);    
 }
 
 // Function to generate waypoints along a Cubic Bezier curve and move to them
@@ -486,7 +520,7 @@ bool PlanarHybridControl<DOF>::disconnectSystems(std_srvs::Empty::Request &req, 
 
 // goHome Function for sending the WAM safely back to its home starting position.
 template<size_t DOF>
-void PlanarHybridControl<DOF>::go_home()
+void PlanarHybridControl<DOF>::goHome()
 {
     ROS_INFO("Returning to Home Position");
     for (size_t i = 0; i < DOF; i++) {
@@ -504,7 +538,7 @@ void PlanarHybridControl<DOF>::go_home()
 
 // goHome Function for sending the WAM safely back to its home starting position.
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::go_home_callback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res)
+bool PlanarHybridControl<DOF>::goHomeCallback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res)
 {
     ROS_INFO("Returning to Home Position");
     for (size_t i = 0; i < DOF; i++) {
@@ -520,7 +554,7 @@ bool PlanarHybridControl<DOF>::go_home_callback(std_srvs::Empty::Request &req, s
 
 //Function to command a joint space move to the WAM with blocking specified
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::joint_move_block_callback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res)
+bool PlanarHybridControl<DOF>::jointMoveBlockCallback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res)
 {
     if (req.joints.size() != DOF) {
         ROS_INFO("Request Failed: %zu-DOF request received, must be %zu-DOF", req.joints.size(), DOF);
@@ -537,7 +571,7 @@ bool PlanarHybridControl<DOF>::joint_move_block_callback(wam_srvs::JointMoveBloc
 
 //Function to update the WAM publisher
 template<size_t DOF>
-void PlanarHybridControl<DOF>::publish_wam(ProductManager& pm)
+void PlanarHybridControl<DOF>::publishWam(ProductManager& pm)
 {   //Current values to be published
     jp_type jp = wam.getJointPositions();
     jt_type jt = wam.getJointTorques();
@@ -590,18 +624,20 @@ void PlanarHybridControl<DOF>::publish_wam(ProductManager& pm)
     force_msg.force[0] = staticForceEstimator.computedF[0];
     force_msg.force[1] = staticForceEstimator.computedF[1];
     force_msg.force[2] = staticForceEstimator.computedF[2];
-    force_msg.force_norm = staticForceEstimator.computedF.norm(); //N in base frame 
-    forceNorm = staticForceEstimator.computedF;
-    forceNorm.normalize();
-    force_msg.force_dir[0] = forceNorm[0];
-    force_msg.force_dir[1] = forceNorm[1];
-    force_msg.force_dir[2] = forceNorm[2];
-    
+    force_msg.force_norm = staticForceEstimator.computedF.norm(); //N in base frame
+    if(staticForceEstimator.computedF.norm() > 14.0){ROS_INFO("Contact detected.");} 
+    if(staticForceEstimator.computedF.norm() > 0.0){
+        force_norm = staticForceEstimator.computedF;
+        force_norm.normalize();
+        force_msg.force_dir[0] = force_norm[0];
+        force_msg.force_dir[1] = force_norm[1];
+        force_msg.force_dir[2] = force_norm[2];
+    }
     wam_estimated_contact_force_pub.publish(force_msg);
-    
+
 }
 
-template<size_t DOF>
+/*template<size_t DOF>
 bool PlanarHybridControl<DOF>::grid_test_calibration(wam_srvs::GridTestCalib::Request &req, wam_srvs::GridTestCalib::Response &res){
     systems::Ramp time(mypm->getExecutionManager());
     systems::TupleGrouper<double, cp_type, jp_type> configLogTg;
@@ -741,7 +777,8 @@ bool PlanarHybridControl<DOF>::grid_test(wam_srvs::GridTest::Request &req, wam_s
 
     return true;
 
-}
+}*/
+
 //wam_main Function
 template<size_t DOF>
 int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam)
@@ -764,7 +801,7 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam)
 
     while (ros::ok() && pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE) {
         ros::spinOnce();       
-        planar_hybrid_controller.publish_wam(pm);
+        planar_hybrid_controller.publishWam(pm);
         pub_rate.sleep();
         
     }

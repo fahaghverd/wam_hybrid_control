@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>planar_surface_hybrid_control</name>
+  <name>wam_spf_control</name>
   <version>0.0.0</version>
-  <description>The planar_surface_hybrid_control for hybrid position/force control of wam on a surface.</description>
+  <description>The wam_spf_control package for position/force control of wam on a surface.</description>
 
   <maintainer email="haghverd@ualberta.ca">funzi</maintainer>
 
