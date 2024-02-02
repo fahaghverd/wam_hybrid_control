@@ -1,24 +1,51 @@
 /*
- * planar_surface_hybrid_control.cpp
+ * spacemouse_teleop_wam.cpp
  *
  *  
  * 
- * Created on: Nov., 2023
+ * Created on: Jan., 2024
  * Author: Faezeh
  */
-
-#include "planar_surface_hybrid_control/planar_surface_hybrid_control.h"
+#include "spacemouse_teleop_wam.h"
 
 // Templated Initialization Function
 template<size_t DOF>
-void PlanarHybridControl<DOF>::init(ProductManager& pm){
+void JoytoWAM<DOF>::init(ProductManager& pm){  
+    a = 0.0;
+    b = 0.0;
+
+    R1 = Eigen::MatrixXd::Identity(2, 2);
+
+    motion_dir = true;
+    bases_changed = true;
+    start_teleop = false;
+
+    speed_scale_ = {0.001};
+    ros::param::get("~initial_speed", speed_scale_);
+    if (speed_scale_.size() == 1){
+        speed_scale_ = std::vector<double>(2, speed_scale_[0]);
+    } else if (speed_scale_.size() != 2){
+        throw std::runtime_error("initial speed should be length of 1 or 2 but got" + std::to_string(speed_scale_.size()));
+    }
+
+    speed_multiplier_ = {2};
+    speed_divider_ = {0.5, 0.5};
+    ros::param::get("~initial_multiplier",speed_multiplier_);
+    if (speed_multiplier_.size() == 1){
+        speed_multiplier_ = std::vector<double>(2, speed_multiplier_[0]);
+    } else if (speed_multiplier_.size() != 2){
+        throw std::runtime_error("initial multiplier should be length of 1 or 2 but got" + std::to_string(speed_multiplier_.size()));
+    }
+    
+    prev_button_stats_ = {0, 0};
+    pressedButtons = {0, 0};
+
     msg_timeout.fromSec(0.3);
     mypm = &pm;
     locked_joints = false;
     systems_connected = false;
     force_estimated = false;
   
-    outputFile.open("home/output.txt");
     ROS_INFO("%zu-DOF WAM", DOF);
     jp_home = wam.getJointPositions();
     wam.gravityCompensate(true); // gravity compensation default set to true
@@ -42,14 +69,12 @@ void PlanarHybridControl<DOF>::init(ProductManager& pm){
     wam_jacobian_mn.data.resize(DOF*6);
 
     // ROS services
-    go_home_srv = n_.advertiseService("go_home", &PlanarHybridControl::goHomeCallback, this);
-    joint_move_block_srv = n_.advertiseService("joint_move_block", &PlanarHybridControl::jointMoveBlockCallback, this);
-    surface_calibrartion_srv = n_.advertiseService("surface_calibrartion", &PlanarHybridControl<DOF>::calibration, this);
-    collect_cp_trajectory_srv = n_.advertiseService("collect_cp_trajectory", &PlanarHybridControl<DOF>::collectCpTrajectory, this);
-    planar_surface_hybrid_control_srv = n_.advertiseService("planar_surface_hybrid_control", &PlanarHybridControl<DOF>::SPFCartImpCOntroller, this);
-    disconnect_systems_srv = n_.advertiseService("disconnect_systems", &PlanarHybridControl::disconnectSystems, this);
-    //grid_test_calib_srv = n_.advertiseService("grid_test_calib", &PlanarHybridControl::grid_test_calibration, this);
-    //grid_test_srv = n_.advertiseService("grid_test", &PlanarHybridControl::grid_test, this);
+    go_home_srv = n_.advertiseService("go_home", &JoytoWAM::goHomeCallback, this);
+    joint_move_block_srv = n_.advertiseService("joint_move_block", &JoytoWAM::jointMoveBlockCallback, this);
+    calibrartion_srv = n_.advertiseService("calibrartion", &JoytoWAM<DOF>::calibration, this);
+    disconnect_systems_srv = n_.advertiseService("disconnect_systems", &JoytoWAM::disconnectSystems, this);
+    contact_control_teleop_srv = n_.advertiseService("contact_control_teleop", &JoytoWAM::contactControlTeleop, this);
+
 
     // ROS publishers
     wam_joint_state_pub = n_.advertise < sensor_msgs::JointState > ("joint_states", 1);
@@ -57,10 +82,10 @@ void PlanarHybridControl<DOF>::init(ProductManager& pm){
     wam_jacobian_mn_pub = n_.advertise < wam_msgs::MatrixMN > ("jacobian",1);
     wam_tool_pub = n_.advertise < wam_msgs::RTToolInfo > ("tool_info",1);
     wam_estimated_contact_force_pub = n_.advertise < wam_msgs::RTCartForce > ("static_estimated_force",1);
-
     
     // ROS subscribers
-    
+    joy_sub_ = n_.subscribe("/spacenav/joy", 1, &JoytoWAM::joyCallback, this);
+
     // CONNECT SPRING SYSTEM //TODO: check if its okay to connect here.
     systems::forceConnect(KxSet.output, ImpControl.KxInput);
     systems::forceConnect(DxSet.output, ImpControl.DxInput);
@@ -100,7 +125,7 @@ void PlanarHybridControl<DOF>::init(ProductManager& pm){
 
 // Templated Surface Calibration Function
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res){   
+bool JoytoWAM<DOF>::calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res){   
     systems::Ramp time(mypm->getExecutionManager());
     systems::TupleGrouper<double, cp_type, jp_type> configLogTg;
     const double T_s = mypm->getExecutionManager()->getPeriod();
@@ -111,8 +136,8 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
 		return false;
 	}
 
-    std::string path = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path;
-
+    std::string path_trj = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/joyToWamCalib/" + req.path + "Trj";
+    std::string path_pnts = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path + "Pts";
 
     // Record at 1/10th of the loop rate
     systems::PeriodicDataLogger<config_sample_type> configLogger(
@@ -122,7 +147,9 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
 
     std::cout<< "Move the robot to the first contact point and Press [Enter]."<<std::endl;
     waitForEnter();
-    v1 = wam.getToolPosition();
+    p1 = wam.getToolPosition();
+    P1 = wam.getJointPositions();
+    pts.col(0) = p1;
 
     {   
         // Make sure the Systems are connected on the same execution cycle
@@ -137,29 +164,55 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
         time.start();
     }
 
-    std::cout<< "Move the robot on the surface in a line and Press [Enter]."<<std::endl;
+    std::cout<< "Move the robot on the surface to the second  point and Press [Enter]."<<std::endl;
     waitForEnter();
-    v2 = wam.getToolPosition();
+    p2 = wam.getToolPosition();
+    P2 = wam.getJointPositions();
+    pts.col(1) = p2;
 
-    std::cout<< "Move the robot on the surface in a line perpendicular to the previous line and Press [Enter]."<<std::endl;
+    std::cout<< "Move the robot on to the third point and Press [Enter]."<<std::endl;
     waitForEnter();
-    v3 = wam.getToolPosition();
+    p3 = wam.getToolPosition();
+    P3 = wam.getJointPositions();
+    pts.col(2) = p3;
 
     configLogger.closeLog();
     disconnect(configLogger.input);
 
-    std::ofstream outputFile(path);
-
+    std::ofstream outputFile(path_trj);
     if (!outputFile.is_open()) {
         printf("ERROR: Couldn't create the file!\n");
         return false;
     }
+
     log::Reader<config_sample_type> lr(tmpFile);
 	lr.exportCSV(outputFile);
     std::remove(tmpFile);
     outputFile.close();
 
-    surface_normal = ((v2-v1).cross(v3-v2));
+    std::ofstream outputFile2(path_pnts);
+    if (!outputFile2.is_open()) {
+        printf("ERROR: Couldn't create the file!\n");
+        return false;
+    }
+
+    // Write the matrix to the CSV file
+    for (int i = 0; i < pts.rows(); ++i) {
+        for (int j = 0; j < pts.cols(); ++j) {
+            // Use a comma as a delimiter
+            outputFile2 << pts(i, j);
+
+            // Add a comma for all but the last element in a row
+            if (j < pts.cols() - 1) {
+                outputFile2 << ",";
+            }
+        }
+        // Start a new line after each row
+        outputFile2 << std::endl;
+    }
+    outputFile2.close();
+
+    surface_normal = ((p2-p1).cross(p3-p2));
     surface_normal.normalize();
     std::cout<<"Surface normal: "<< surface_normal << std::endl;   
     
@@ -170,165 +223,308 @@ bool PlanarHybridControl<DOF>::calibration(wam_srvs::Teach::Request &req, wam_sr
     return true;
 }
 
-
-// Function to Collect Cartesian Trajectory
-template <size_t DOF>
-bool PlanarHybridControl<DOF>::collectCpTrajectory(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res) {
-    ROS_INFO("Collecting cartesian trajectory.");
-
-    // Setup
-    systems::Ramp time(mypm->getExecutionManager());
-    systems::TupleGrouper<double, cp_type> cpLogTg;
-    const double T_s = mypm->getExecutionManager()->getPeriod();
-
-    // Create a temporary file for data storage
-    char tmpFile[] = "/tmp/btXXXXXX";
-    if (mkstemp(tmpFile) == -1) {
-        perror("ERROR: Couldn't create temporary file!");
-        return false;
-    }
-
-    // Set the file path for saving the trajectory data
-    std::string path = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path;
-    ROS_INFO_STREAM("Collecting cartesian trajectory. Saving to: " << path);
-
-    // Record at 1/10th of the loop rate
-    systems::PeriodicDataLogger<cp_sample_type> cpLogger(
-        mypm->getExecutionManager(),
-        new barrett::log::RealTimeWriter<cp_sample_type>(tmpFile, 10 * T_s),
-        10);
-
-    // Prompt to start collecting
-    printf("Press [Enter] to start collecting.\n");
-    waitForEnter();
-    initial_point = wam.getToolPosition();
-
-    {
-        // Connect systems for data logging
-        BARRETT_SCOPED_LOCK(mypm->getExecutionManager()->getMutex());
-        connect(time.output, cpLogTg.template getInput<0>());
-        connect(wam.toolPosition.output, cpLogTg.template getInput<1>());
-        connect(cpLogTg.output, cpLogger.input);
-        time.start();
-    }
-
-    // Prompt to stop collecting
-    printf("Press [Enter] to stop collecting.\n");
-    waitForEnter();
-
-    // Finish data logging
-    cpLogger.closeLog();
-    disconnect(cpLogger.input);
-
-    // Create and write trajectory data to the output file
-    std::ofstream outputFile(path);
-    log::Reader<cp_sample_type> lr(tmpFile);
-    lr.exportCSV(outputFile);
-
-    // Cleanup: Remove temporary file and close the output file
-    std::remove(tmpFile);
-    outputFile.close();
-
-    // Finish the process
-    ROS_INFO_STREAM("Collecting done. Press [Enter] to go home.");
-    waitForEnter();
-    goHome();
-
-    return true;
-}
-
-
-
-// Impedance cp_position controller for surface path following
-//Lets play the collected trajectory as the trajectory! We can also try collecting when not in contaact
-//and then it projects. Also, we can reshape the trajectory based on the initial point and the projection
-//matirx, like if its drawing z on the wall, should be able to draw it on the table as well.
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::SPFCartImpCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res){
-    wam.idle(); //to disconnect hold joint torques!
-    
-    surface_normal[0] = 0.0;
-    surface_normal[1] = 0.0;
-    surface_normal[2] = 1.0;
+void JoytoWAM<DOF>::joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
+    /*:type msg: sensor_msgs.msg.Joy
 
-    //Extracting cartesian trajectory from collected trajectory.
-    std::string path = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path;
-    std::ifstream inputFile(path);
-    if (!inputFile.is_open()) {
-        perror("ERROR: Couldn't open temporary file for reading!");
-        return false;
+    axes: [
+        x (front)
+        y (left)
+        z (up)
+        R (around x)
+        P (around y)
+        Y (around z)
+    ]
+    buttons: [
+        left button,
+        right button,
+    ]*/
+    if(start_teleop){
+        curr_button_stats_ = msg->buttons;
+
+        for (std::size_t i = 0; i < curr_button_stats_.size(); ++i) {
+            pressedButtons[i] = (!prev_button_stats_[i] && curr_button_stats_[i]);  // True if the button is pressed in the current state but not in the previous state
+        }
+        
+        prev_button_stats_ = curr_button_stats_;
+
+        for (std::size_t i = 0; i < speed_multiplier_.size(); ++i) {
+                speed_divider_[i] /= speed_multiplier_[i];
+            }
+
+        if (pressedButtons[0]) {
+            scaleArray(speed_scale_, speed_divider_);
+        } else if (pressedButtons[1]) {
+            scaleArray(speed_scale_, speed_multiplier_);
+        }
+        
+        R = findingRotationMatrix((p2-p1), (p3-p2));
+        joy_axis << msg->axes[0], msg->axes[1], msg->axes[2];
+        rotated_joy_axis = R * joy_axis.segment(0, 2);
+
+        a += rotated_joy_axis[0] * speed_scale_[0];
+        b += rotated_joy_axis[1] * speed_scale_[1]; 
+
+        //or
+        /*a = msg->axes[0] * speed_scale_[0];
+        b = msg->axes[1] * speed_scale_[1];*/
+
+
+        if (a > 1){a = 1;} else if (a < -1) {a = -1;}
+        if (b > 1){b = 1;} else if (b < -1) {b = -1;}
+        
+        
+        if(abs(msg->axes[0]) >= 0.01 || abs(msg->axes[1]) >= 0.01){
+            if(motion_dir){p4 = p3 + (a/(p2-p1).norm())*(p2-p1) + (b/(p3-p2).norm())*(p3-p2);}
+            else { p4 = p3 + (b/(p2-p1).norm())*(p2-p1) + (a/(p3-p2).norm())*(p3-p2);}
+            // Add the received pose to the list
+            geometry_msgs::PoseStamped new_pose;
+            new_pose.pose.position.x = p4[0];
+            new_pose.pose.position.y = p4[1];
+            new_pose.pose.position.z = p4[2];
+            betha = angleBetweenVectors((p3-p2),(p4-p3));  
+            if ((p4-p3).norm() >= 0.2  && abs(betha) >=0.5 && abs(betha) <= 2.62) {
+                std::cout<<betha<<std::endl; 
+                ROS_INFO("Bases Changed.");
+                p1 = p2;
+                p2 = p3;
+                p3 = p4;
+                a = 0;
+                b = 0;
+                //reset the speed as well
+            }
+        }     
     }
- 
-    std::vector<cp_sample_type> vec;
-    std::string line;
-    while (std::getline(inputFile, line)) {
-       std::istringstream iss(line);
-       cp_sample_type sample;
-       char comma;
-       iss >> sample.get<0>() >> comma >> sample.get<1>().x() >> comma >> sample.get<1>().y() >> comma >> sample.get<1>().z();
-       vec.push_back(sample);
+}
+template<size_t DOF>
+void JoytoWAM<DOF>::scaleArray(std::vector<double>& array, const std::vector<double>& scale) {
+    // Check if the sizes of the input vector and the scaling factor vector match
+    if (array.size() == scale.size()) {
+        // Scale each element of the array by the corresponding element in the scale vector
+        for (std::size_t i = 0; i < array.size(); ++i) {
+            array[i] *= scale[i];
+        }
+    } else {
+        throw std::runtime_error("Scaled arrays should have same size.");
     }
-
-    // Extract cp_type values from vec
-    std::vector<cp_type> cp_trj;
-    for (const auto& record : vec) {
-        cp_trj.push_back(boost::get<1>(record));
-    }
-
-    initial_point = cp_trj[0]; //Initial contact point
-
-    //Impedance Control params
-    cp_type KpApplied, KdApplied;
-    KpApplied << 100, 100, 100;
-    KdApplied << 20, 20, 20;
-    
-    //Moving to initial point
-    std::vector<units::CartesianPosition::type> waypoints = generateCubicSplineWaypoints(wam.getToolPosition(), initial_point, 0.0);
-    //std::cout<<"initial_point:"<<initial_point<<std::endl;
-    CartImpController(waypoints, 1, KpApplied, KdApplied); //TODO Try if the function works.
-
-    //Impedance Control params
-    cp_type OrnKpApplied, OrnKdApplied;
-    OrnKpApplied << 10, 10, 10;
-    OrnKdApplied << 6, 6, 6;
-    
-    cp_type projected_waypoint;
-    cp_type waypoint;
-    std::vector<cp_type> projected_waypoints;
-    size_t iteration_count = 0;
-    for (int i = 40; i<cp_trj.size(); i+=5) {
-        waypoint = cp_trj[i];
-
-        // Calculate the vector from the point on the plane to the given point
-        cp_type PQ;
-        PQ = waypoint - initial_point;
-    
-        // Calculate the projection of PQ onto the plane's normal vector
-        double projectionScalar;
-        projectionScalar = PQ.dot(surface_normal) / surface_normal.squaredNorm();
-        cp_type projection;
-        projection = projectionScalar * surface_normal;      
-        projected_waypoint = waypoint - projection;
-        projected_waypoints[iteration_count] = projected_waypoint;
-        iteration_count += 1;
-
-        /*projected_waypoint = b_rot_t * t_rot_s * S * s_rot_t * t_rot_b * waypoint*/ //Todo: check this, also check hybrid mode!
-    }
-
-    CartImpController(projected_waypoints, 5, KpApplied, KdApplied, true, OrnKpApplied, OrnKdApplied); // TODO: check the orientation control in the lopp.
-
-    cf_type force_des_surface; 
-    force_des_surface << 0.0, 0.0, -3.0;
-    //Todo: Find rotation from surface to base, and check this.
-    //force_des_body = b_rot_t * t_rot_s * S * force_des_surface;
-    //CartImpController(projected_waypoints, 5, KpApplied, KdApplied, true, OrnKpApplied, OrnKdApplied, true, des_froce);
-
-    
-    return true;
 }
 
 template<size_t DOF>
-void PlanarHybridControl<DOF>::CartImpController(std::vector<cp_type> &Trajectory, int step, const cp_type &KpApplied, const cp_type &KdApplied,
+Eigen::Matrix2d JoytoWAM<DOF>::findingRotationMatrix(const Eigen::Vector3d& vector1, const Eigen::Vector3d& vector2){
+    x_axis << 1, 0, p1(2);
+    y_axis << 0, 1, p1(2);
+    x_naxis << -1, 0, p1(2);
+    y_naxis << 0, -1, p1(2);
+    
+    theta_vec << angleBetweenVectors(x_axis,vector1) , angleBetweenVectors(x_axis,vector2), angleBetweenVectors(x_naxis,vector1), angleBetweenVectors(x_naxis,vector2);
+    std::cout<<minAbsElement(theta_vec) + 1<<std::endl;
+    switch (minAbsElement(theta_vec)){
+        case 0:
+            //v1 near x, v2 near y or-y
+            motion_dir = true;
+            ROS_INFO("1.");
+            gamma_vec << angleBetweenVectors(y_axis,vector2) , angleBetweenVectors(y_naxis,vector2);
+            
+            if (minAbsElement(gamma_vec) == 1) {
+
+                R1(0,0) = 1;
+                R1(0,1) = 0;
+                R1(1,0) = 0;
+                R1(1,1) = -1;
+                ROS_INFO("1n.");
+            }
+            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
+            break;
+        
+        case 1:
+            //v2 near x, v1 near y or -y
+            motion_dir = false;
+            ROS_INFO("2.");
+            gamma_vec << angleBetweenVectors(y_axis,vector1) , angleBetweenVectors(y_naxis,vector1);
+            
+            if (minAbsElement(gamma_vec) == 1) {
+
+                R1(0,0) = 1;
+                R1(0,1) = 0;
+                R1(1,0) = 0;
+                R1(1,1) = -1;
+                ROS_INFO("2n.");
+            }
+            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
+            break;
+        
+        case 2:
+            //v1 near -x, v2 near y or -y
+            motion_dir = true;
+            ROS_INFO("3.");
+            gamma_vec << angleBetweenVectors(y_axis,vector2) , angleBetweenVectors(y_naxis,vector2);
+            
+            if (minAbsElement(gamma_vec) == 0){
+                R1(0,0) = -1;
+                R1(0,1) = 0;
+                R1(1,0) = 0;
+                R1(1,1) = 1;
+                ROS_INFO("3n.");
+            } else {
+                R1(0,0) = -1;
+                R1(0,1) = 0;
+                R1(1,0) = 0;
+                R1(1,1) = -1;
+                ROS_INFO("3nn.");
+            }
+            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
+            break;
+        
+        case 3:
+            //v2 near -x 
+            motion_dir = false;
+            ROS_INFO("4.");
+            gamma_vec << angleBetweenVectors(y_axis,vector1) , angleBetweenVectors(y_naxis,vector1);
+            
+            if (minAbsElement(gamma_vec) == 0){
+                
+                R1(0,0) = -1;
+                R1(0,1) = 0;
+                R1(1,0) = 0;
+                R1(1,1) = 1;
+                ROS_INFO("4n.");
+            } else {
+                
+                R1(0,0) = -1;
+                R1(0,1) = 0;
+                R1(1,0) = 0;
+                R1(1,1) = -1;
+                ROS_INFO("4nn.");
+            }
+            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
+            break;
+    }
+    R2(0,0) = cos(alpha);
+    R2(0,1) = sin(alpha); //the signs should be reverse but for unknown reasons it seams like it works better this way!!!
+    R2(1,0) = -sin(alpha);
+    R2(1,1) = cos(alpha);
+    
+    R = R2*R1;
+    
+
+    return R;
+}
+
+template<size_t DOF>
+int JoytoWAM<DOF>::minAbsElement(const Eigen::VectorXd& angleVector){
+    // Calculate the minimum absolute element
+    double minAbsElement = angleVector.array().abs().minCoeff();
+
+    // Find the index of the minimum absolute element
+    int minAbsIndex = -1;
+    for (int i = 0; i < angleVector.size(); ++i) {
+        if (std::abs(angleVector(i)) == minAbsElement) {
+            minAbsIndex = i;
+            break;
+        }
+    }
+
+    return minAbsIndex;
+}
+template<size_t DOF>
+// Function to calculate the angle and direction between two vectors (from first to second vector)
+double JoytoWAM<DOF>::angleBetweenVectors(const Eigen::Vector3d& vector1, const Eigen::Vector3d& vector2) {
+    // Calculate the cross product
+    Eigen::Vector3d crossProduct = vector1.cross(vector2);
+
+    // Calculate the angle
+    double angle = std::atan2(crossProduct.norm(), vector1.dot(vector2));
+
+    // Determine the direction of the angle using the sign of the components of the cross product
+    if (crossProduct(2) < 0) {
+        angle = -angle;
+    }
+
+    return angle; //Radian
+}
+
+template<size_t DOF>
+bool JoytoWAM<DOF>::contactControlTeleop(wam_srvs::ContactControlTeleop::Request &req, wam_srvs::ContactControlTeleop::Response &res){
+    
+    if(req.start){
+        //Extracting cartesian points from collected trajectory in calibration.
+        std::string path_trj = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/joyToWamCalib/" + req.path + "Trj";
+        std::string path_pnts = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path + "Pts";
+        std::ifstream inputFile(path_trj);
+        if (!inputFile.is_open()) {
+            perror("ERROR: Couldn't open temporary file for reading!");
+        }
+
+        std::vector<cp_sample_type> vec;
+        std::string line;
+        while (std::getline(inputFile, line)) {
+        std::istringstream iss(line);
+        cp_sample_type sample;
+        char comma;
+        iss >> sample.get<0>() >> comma >> sample.get<1>().x() >> comma >> sample.get<1>().y() >> comma >> sample.get<1>().z();
+        vec.push_back(sample);
+        }
+
+        // Extract cp_type values from vec
+        std::vector<cp_type> cp_trj;
+        for (const auto& record : vec) {
+            cp_trj.push_back(boost::get<1>(record));
+        }
+
+        std::ifstream inputFile2(path_pnts);
+        if (!inputFile2.is_open()) {
+            perror("ERROR: Couldn't open temporary file for reading!");
+        }
+
+        for (int i = 0; i < pts.rows(); ++i) {
+            for (int j = 0; j < pts.cols(); ++j) {
+                // Read the element from the file
+                if (!(inputFile2 >> pts(i, j))) {
+                    std::cerr << "Error reading from file: " << path_pnts << std::endl;
+                }
+
+                // Check for a comma (skip it if present)
+                if (j < pts.cols() - 1) {
+                    char comma;
+                    inputFile2 >> comma;
+                    if (comma != ',') {
+                        std::cerr << "Error: Expected comma in file: " << path_pnts << std::endl;
+                    }
+                }
+            }
+        }
+        p1 = pts.col(0);
+        p2 = pts.col(1);
+        p3 = pts.col(2);
+
+        std::cout<< "Press [Enter] to move to the initial point on the table."<<std::endl;
+        waitForEnter();
+        
+        std::vector<cp_type>  p1_trj = generateCubicSplineWaypoints(wam.getToolPosition(), p1, 0.0);
+        //Impedance Control params
+        cp_type KpApplied, KdApplied;
+        KpApplied << 100, 100, 100;
+        KdApplied << 20, 20, 20;
+        CartImpController(p1_trj, 1, KpApplied, KdApplied);
+
+        std::cout<< "Press [Enter] to move to replay the base vectors."<<std::endl;
+        waitForEnter();
+        CartImpController(cp_trj, 1, KpApplied, KdApplied);
+
+        std::cout<< "Press [Enter] to start navigating the WAM on the surface with SpaceMouse."<<std::endl;
+        waitForEnter();
+        start_teleop = true;
+        return true;
+    } else {
+        start_teleop = false;
+        a = 0;
+        b = 0;
+        return true;
+    } 
+}
+
+template<size_t DOF>
+void JoytoWAM<DOF>::CartImpController(std::vector<cp_type> &Trajectory, int step, const cp_type &KpApplied, const cp_type &KdApplied,
                                                  bool orientation_control, const cp_type &OrnKpApplied, const cp_type &OrnKdApplied,
                                                  bool ext_force, const cf_type &des_force, bool null_space){
     //Impedance Control params
@@ -361,7 +557,7 @@ void PlanarHybridControl<DOF>::CartImpController(std::vector<cp_type> &Trajector
             // Ensure the resulting matrix is still a valid rotation matrix
             Eigen::JacobiSVD<Eigen::MatrixXd> svd(Rotation, Eigen::ComputeFullU | Eigen::ComputeFullV);
             Eigen::Matrix3d Rotation_des = svd.matrixU() * svd.matrixV().transpose();
-            std::cout<<Rotation<<std::endl;
+
             // Check if the determinant is 1 to ensure it's a rotation matrix
             if (Rotation_des.determinant() < 0) {
                 // If the determinant is -1, flip the sign of one of the singular vectors
@@ -407,7 +603,7 @@ void PlanarHybridControl<DOF>::CartImpController(std::vector<cp_type> &Trajector
 
 // Function to generate waypoints along a Cubic Bezier curve and move to them
 template <size_t DOF>
-std::vector<units::CartesianPosition::type> PlanarHybridControl<DOF>::generateCubicSplineWaypoints(
+std::vector<units::CartesianPosition::type> JoytoWAM<DOF>::generateCubicSplineWaypoints(
     const units::CartesianPosition::type& initialPos,
     const units::CartesianPosition::type& finalPos,
     double offset
@@ -468,10 +664,8 @@ std::vector<units::CartesianPosition::type> PlanarHybridControl<DOF>::generateCu
     return waypoints;
 }
 
-
-
 template<size_t DOF>
-void PlanarHybridControl<DOF>::disconnectSystems() {
+void JoytoWAM<DOF>::disconnectSystems() {
     if (systems_connected) {
         systems::disconnect(wam.input);
         systems_connected = false;
@@ -483,14 +677,14 @@ void PlanarHybridControl<DOF>::disconnectSystems() {
 }
 
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::disconnectSystems(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res) { //??
+bool JoytoWAM<DOF>::disconnectSystems(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res) { //??
     disconnectSystems();
     return true;
 }
 
 // goHome Function for sending the WAM safely back to its home starting position.
 template<size_t DOF>
-void PlanarHybridControl<DOF>::goHome()
+void JoytoWAM<DOF>::goHome()
 {
     ROS_INFO("Returning to Home Position");
     for (size_t i = 0; i < DOF; i++) {
@@ -508,7 +702,7 @@ void PlanarHybridControl<DOF>::goHome()
 
 // goHome Function for sending the WAM safely back to its home starting position.
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::goHomeCallback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res)
+bool JoytoWAM<DOF>::goHomeCallback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res)
 {
     ROS_INFO("Returning to Home Position");
     for (size_t i = 0; i < DOF; i++) {
@@ -524,7 +718,7 @@ bool PlanarHybridControl<DOF>::goHomeCallback(std_srvs::Empty::Request &req, std
 
 //Function to command a joint space move to the WAM with blocking specified
 template<size_t DOF>
-bool PlanarHybridControl<DOF>::jointMoveBlockCallback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res)
+bool JoytoWAM<DOF>::jointMoveBlockCallback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res)
 {
     if (req.joints.size() != DOF) {
         ROS_INFO("Request Failed: %zu-DOF request received, must be %zu-DOF", req.joints.size(), DOF);
@@ -541,7 +735,7 @@ bool PlanarHybridControl<DOF>::jointMoveBlockCallback(wam_srvs::JointMoveBlock::
 
 //Function to update the WAM publisher
 template<size_t DOF>
-void PlanarHybridControl<DOF>::publishWam(ProductManager& pm)
+void JoytoWAM<DOF>::publishWam(ProductManager& pm)
 {   //Current values to be published
     jp_type jp = wam.getJointPositions();
     jt_type jt = wam.getJointTorques();
@@ -607,147 +801,6 @@ void PlanarHybridControl<DOF>::publishWam(ProductManager& pm)
 
 }
 
-/*template<size_t DOF>
-bool PlanarHybridControl<DOF>::grid_test_calibration(wam_srvs::GridTestCalib::Request &req, wam_srvs::GridTestCalib::Response &res){
-    systems::Ramp time(mypm->getExecutionManager());
-    systems::TupleGrouper<double, cp_type, jp_type> configLogTg;
-    const double T_s = mypm->getExecutionManager()->getPeriod();
-
-    char tmpFile_w[] = "/tmp/btXXXXXX";
-	if (mkstemp(tmpFile_w) == -1) {
-		printf("ERROR: Couldn't create temporary file!\n");
-		return false;
-	}
-
-    std::string path_w = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/gridTest/" + req.width_path;
-
-    // Record at 1/10th of the loop rate
-    systems::PeriodicDataLogger<config_sample_type> configLogger(
-        mypm->getExecutionManager(),
-        new barrett::log::RealTimeWriter<config_sample_type>(tmpFile_w, 10*T_s),
-        10);
-
-    
-    std::cout<< "Move the robot to the first contact point and Press [Enter]."<<std::endl;
-    waitForEnter();
-    p1 = wam.getToolPosition();
-
-    {   
-        // Make sure the Systems are connected on the same execution cycle
-        // that the time is started. Otherwise we might record a bunch of
-        // samples all having t=0; this is bad because the Spline requires time
-        // to be monotonic.
-        BARRETT_SCOPED_LOCK(mypm->getExecutionManager()->getMutex());
-        connect(time.output, configLogTg.template getInput<0>());
-        connect(wam.toolPosition.output, configLogTg.template getInput<1>());
-        connect(wam.jpOutput, configLogTg.template getInput<2>());
-        connect(configLogTg.output, configLogger.input);
-        time.start();
-    }
-
-    std::cout<< "Move the robot on the surface to the second point and Press [Enter]."<<std::endl;
-    waitForEnter();
-
-    time.stop();
-    time.reset();
-    configLogger.closeLog();
-    disconnect(configLogger.input);
-
-    std::ofstream outputFile_w(path_w);
-
-    if (!outputFile_w.is_open()) {
-        printf("ERROR: Couldn't create the file!\n");
-        return false;
-    }
-    log::Reader<config_sample_type> lr_w(tmpFile_w);
-	lr_w.exportCSV(outputFile_w);
-    std::remove(tmpFile_w);
-    outputFile_w.close();
-    p2 = wam.getToolPosition();
-
-    char tmpFile_l[] = "/tmp/btXXXXXX";
-	if (mkstemp(tmpFile_l) == -1) {
-		printf("ERROR: Couldn't create temporary file!\n");
-		return false;
-	}
-    // Record at 1/10th of the loop rate
-    systems::PeriodicDataLogger<config_sample_type> configLogger_l(
-        mypm->getExecutionManager(),
-        new barrett::log::RealTimeWriter<config_sample_type>(tmpFile_l, 10*T_s),
-        10);
-
-    std::string path_l = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/gridTest/" + req.length_path;
-  
-    std::cout<< "Press [Enter] and start collecting the lngth."<<std::endl;
-    waitForEnter();
-    {   
-        // Make sure the Systems are connected on the same execution cycle
-        // that the time is started. Otherwise we might record a bunch of
-        // samples all having t=0; this is bad because the Spline requires time
-        // to be monotonic.
-        BARRETT_SCOPED_LOCK(mypm->getExecutionManager()->getMutex());
-        connect(configLogTg.output, configLogger_l.input);
-        time.start();
-    }
-
-    std::cout<< "Move the robot on the surface to the second point and Press [Enter]."<<std::endl;
-    waitForEnter();
-
-    configLogger_l.closeLog();
-    disconnect(configLogger_l.input);
-
-    std::ofstream outputFile_l(path_l);
-
-    if (!outputFile_l.is_open()) {
-        printf("ERROR: Couldn't create the file!\n");
-        return false;
-    }
-    log::Reader<config_sample_type> lr_l(tmpFile_l);
-	lr_l.exportCSV(outputFile_l);
-    std::remove(tmpFile_l);
-    outputFile_l.close();
-    p3 = wam.getToolPosition();
-
-    return true;
-}
-
-template<size_t DOF>
-bool PlanarHybridControl<DOF>::grid_test(wam_srvs::GridTest::Request &req, wam_srvs::GridTest::Response &res){
-    double a = req.a;
-    double b = req.b;
-
-    //V1 = p2-p1;
-    //V2 = p3-p2;
-
-    //cp_type cp_cmd = (a*V1+b*V2) + p1;
-    //std::cout<< "p1:" << p1 <<std::endl;
-    //std::cout<< "p2:" << p2 <<std::endl;
-    //std::cout<< "p3:" << p3 <<std::endl;
-    //std::cout<< "cp_cmd:" << cp_cmd <<std::endl;
-    //cp_type cp_cmd;
-    //cp_cmd[0] = 0.4988699631202508;//0.515487; 3.3%
-    //cp_cmd[1] =  0.3713980418563303;//0.357516; 3.7%
-    //cp_cmd[2] =  -0.2751059795701481;//-0.274274; 0.3%
-
-    cp_type cp_cmd;
-    cp_cmd[0] = 0.512028;//0.4988699631202508;// 2.6%
-    cp_cmd[1] = 0.351117;// 0.3713980418563303; 5.4%
-    cp_cmd[2] = -0.274203; //-0.2751059795701481;// 0.3%
-
-
-    std::vector<units::CartesianPosition::type> waypoints = generateCubicSplineWaypoints(wam.getToolPosition(), cp_cmd, 0.0);
-
-    for (const auto& waypoint : waypoints) {
-        // Move to the waypoint
-        wam.moveTo(waypoint);
-        btsleep(0.5);
-        cp_type e = (waypoint - wam.getToolPosition())/(waypoint.norm());
-        if(e.norm() > 0.02) {std::cout<<e<<std::endl;}   
-    }
-
-    return true;
-
-}*/
 
 //wam_main Function
 template<size_t DOF>
@@ -755,14 +808,12 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam)
 {
     BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
     ros::init(argc, argv, "wam");
-    
     ros::NodeHandle n_;
-    PlanarHybridControl<DOF> planar_hybrid_controller(wam, pm);
-    planar_hybrid_controller.init(pm);
-    
+    JoytoWAM<DOF> joy_to_wam(wam, pm);
+    joy_to_wam.init(pm);
     ROS_INFO_STREAM("wam node initialized");
     ros::Rate pub_rate(PUBLISH_FREQ);
-    
+
     // Moving to the start pose
     jp_type POS_READY;
     POS_READY << 0.002227924477643431, -0.1490540623980915, -0.04214558734519736, 1.6803055108189549;
@@ -770,11 +821,12 @@ int wam_main(int argc, char** argv, ProductManager& pm, systems::Wam<DOF>& wam)
     wam.idle();
 
     while (ros::ok() && pm.getSafetyModule()->getMode() == SafetyModule::ACTIVE) {
-        ros::spinOnce();       
-        planar_hybrid_controller.publishWam(pm);
+        ros::spinOnce();
+        joy_to_wam.publishWam(pm);
+        //joy_to_wam.updateRT(pm);
         pub_rate.sleep();
-        
     }
     ROS_INFO_STREAM("wam node shutting down");
     return 0;
 }
+

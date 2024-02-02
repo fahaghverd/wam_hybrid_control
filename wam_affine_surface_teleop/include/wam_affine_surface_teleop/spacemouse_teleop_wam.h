@@ -1,9 +1,9 @@
 /*
- * planar_surface_hybrid_control.hpp
+ * spacemouse_teleop_wam.h
  *
  *  
  * 
- * Created on: Nov., 2023
+ * Created on: Jan., 2024
  * Author: Faezeh
  */
 #include <cstdio>
@@ -14,8 +14,12 @@
 #include <string>
 #include <sstream>
 #include <fstream>
+#include <eigen3/Eigen/Geometry>
+#include <eigen3/Eigen/Dense>
 
-
+#include <libconfig.h++>
+#include <fcntl.h>
+#include <termios.h>
 
 #include <boost/thread.hpp> // BarrettHand threading
 #include <boost/bind.hpp>
@@ -29,6 +33,7 @@
 #include "wam_srvs/StaticForceEstimationwithG.h"
 #include "wam_msgs/RTCartForce.h"
 #include "sensor_msgs/JointState.h"
+#include "sensor_msgs/Joy.h"
 #include "geometry_msgs/PoseStamped.h"
 #include "wam_msgs/RTOrtn.h"
 #include "wam_msgs/RTCartVel.h"
@@ -40,7 +45,7 @@
 #include "wam_srvs/Teach.h"
 #include "wam_srvs/Play.h"
 #include "wam_srvs/CP_ImpedanceControl.h"
-
+#include "wam_srvs/ContactControlTeleop.h"
 
 #include "ros/ros.h"
 
@@ -54,15 +59,11 @@
 #include <barrett/detail/stl_utils.h>
 #include <barrett/log.h>
 
-#include <libconfig.h++>
-#include <fcntl.h>
-#include <termios.h>
+#include "impedence_controller.h"
+#include "static_force_estimator_withg.h"
+#include "get_jacobian_system.h"
 
-#include "planar_surface_hybrid_control/impedence_controller.h"
-#include "planar_surface_hybrid_control/static_force_estimator_withg.h"
-#include "planar_surface_hybrid_control/get_jacobian_system.h"
-
-static const int PUBLISH_FREQ = 250; // Default Control Loop / Publishing Frequency
+static const int PUBLISH_FREQ = 500; // Default Control Loop / Publishing Frequency
 static const double SPEED = 0.03; // Default Cartesian Velocity
 
 using namespace barrett;
@@ -98,33 +99,50 @@ typename units::JointTorques<DOF>::type saturateJt
 
 //PlanarHybridControl Class
 template<size_t DOF>
-class PlanarHybridControl
+class JoytoWAM
 {
 	BARRETT_UNITS_TEMPLATE_TYPEDEFS(DOF);
+    public:
+        Eigen::Vector2d rotated_joy_axis, gamma_vec;
+        Eigen::Vector3d x_axis, y_axis, x_naxis, y_naxis, joy_axis, cp_eigen;
+        Eigen::Vector4d theta_vec;
+        Eigen::Matrix2d R, R2, R1; //R1 for rotating x/y to -x/-y
+		Eigen::Matrix3d pts;
 
-    protected:
+        float a, b;
+        double theta, gamma, alpha, betha; // theta: angles between motion vectors and x/nx axes. gamma: angles between motion vectors and y/ny axes
+		//alpha: rotationm angle. betha: angle between next motion vectors.
+        bool start_teleop, bases_changed, motion_dir; //if true v1 near x, false v1 near y
+
+        std::vector<double>  speed_scale_, speed_multiplier_, speed_divider_;
+        std::vector<int> prev_button_stats_, curr_button_stats_, pressedButtons;
+
         typedef boost::tuple<double, cp_type, jp_type> config_sample_type;
 		typedef boost::tuple<double, cp_type> cp_sample_type;
-        cp_type surface_normal, initial_point, v1, v2, v3, V1, V2;
-		cf_type forceNorm;
-		jp_type jp_home;
-		jp_type jp_cmd;
+		typedef boost::tuple<double, jp_type> jp_sample_type;
+
+        cp_type cp_initial_point, p1, p2, p3, p4, surface_normal;
+		jp_type jp_initial_point, P1, P2, P3, P4;
+		jp_type jp_home, jp_cmd, jtLimits;
+		cf_type force_norm;
 
 		libconfig::Setting& setting;
 		libconfig::Config config;
 
 		bool locked_joints;
 		bool systems_connected;		
-
 		bool force_estimated;
-		cf_type force_norm;
-
+		
         systems::Wam<DOF>& wam;
-
-        jt_type jtLimits;
 		systems::Callback<jt_type> jtSat;
 
         ros::Duration msg_timeout;
+
+        // subscribed topics
+        sensor_msgs::Joy space_joy_topic;
+
+        // subscribers
+        ros::Subscriber joy_sub_;
 
         //published topics
 		sensor_msgs::JointState wam_joint_state;
@@ -142,15 +160,11 @@ class PlanarHybridControl
 
         // services
 		ros::ServiceServer disconnect_systems_srv;
-		// ros::ServiceServer gravity_srv;
 		ros::ServiceServer go_home_srv;
 		ros::ServiceServer joint_move_block_srv;
-		ros::ServiceServer surface_calibrartion_srv;
-		ros::ServiceServer collect_cp_trajectory_srv;
-		ros::ServiceServer planar_surface_hybrid_control_srv;
+		ros::ServiceServer calibrartion_srv;
 		ros::ServiceServer cp_impedance_control_srv;
-		ros::ServiceServer grid_test_calib_srv;
-		ros::ServiceServer grid_test_srv;
+		ros::ServiceServer contact_control_teleop_srv;
 
 		//Contace Force Estimation
 		StaticForceEstimatorwithG<DOF> staticForceEstimator;
@@ -173,15 +187,13 @@ class PlanarHybridControl
 		systems::ToolForceToJointTorques<DOF> toolforcefeedfwd2jt;
 		systems::Summer<jt_type> torqueSum;
 		systems::ToolTorqueToJointTorques<DOF> tt2jt_ortn_split;
-		
 
     public:
-		ros::NodeHandle n_; // WAM specific nodehandle
-		ProductManager* mypm;
-		
+        ros::NodeHandle n_;
+        ProductManager* mypm;
 
-        PlanarHybridControl(systems::Wam<DOF>& wam_, ProductManager& pm) :
-			n_("wam"),
+        JoytoWAM(systems::Wam<DOF>& wam_, ProductManager& pm):
+            n_("wam"),
 			wam(wam_),
             jtLimits(20.0), 
 			jtSat(boost::bind(saturateJt<DOF>, _1, jtLimits)),
@@ -189,23 +201,26 @@ class PlanarHybridControl
 			gravityTerm(setting["gravity_compensation"]),
 			print(pm.getExecutionManager(),"Data: ", outputFile){}
 
-        ~PlanarHybridControl(){}
+        ~JoytoWAM(){}
 
-		void init(ProductManager& pm);
-		bool calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res);
-		bool collectCpTrajectory(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res);
-		bool goHomeCallback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
+        void init(ProductManager& pm);
+        bool calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res);
+        void joyCallback(const sensor_msgs::Joy::ConstPtr& msg);
+        void scaleArray(std::vector<double>& array, const std::vector<double>& scale);
+        double angleBetweenVectors(const Eigen::Vector3d& vector1, const Eigen::Vector3d& vector2);
+        Eigen::Matrix2d findingRotationMatrix(const Eigen::Vector3d& vector1, const Eigen::Vector3d& vector2);
+        int minAbsElement(const Eigen::VectorXd& angleVectors);
+        bool goHomeCallback(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
         bool jointMoveBlockCallback(wam_srvs::JointMoveBlock::Request &req, wam_srvs::JointMoveBlock::Response &res);
         void publishWam(ProductManager& pm);
-		bool SPFCartImpCOntroller(wam_srvs::Play::Request &req, wam_srvs::Play::Response &res);
-		std::vector<units::CartesianPosition::type> generateCubicSplineWaypoints(const units::CartesianPosition::type& initialPos, const units::CartesianPosition::type& finalPos, double offset);
-		void disconnectSystems();
+        void disconnectSystems();
 		bool disconnectSystems(std_srvs::Empty::Request &req, std_srvs::Empty::Response &res);
 		void goHome();
 		void CartImpController(std::vector<cp_type> &Trajectory, int step = 1, const cp_type &KpApplied = Eigen::Vector3d::Zero(), const cp_type &KdApplied = Eigen::Vector3d::Zero(),
                                                  bool orientation_control = false, const cp_type &OrnKpApplied = Eigen::Vector3d::Zero(), const cp_type &OrnKdApplied = Eigen::Vector3d::Zero(),
                                                  bool ext_force = false, const cf_type &des_force = Eigen::Vector3d::Zero(), bool null_space = false);         
-		//void findLinearlyIndependentVectors(ProductManager& pm);
-
+		bool contactControlTeleop(wam_srvs::ContactControlTeleop::Request &req, wam_srvs::ContactControlTeleop::Response &res); 
+		std::vector<units::CartesianPosition::type> generateCubicSplineWaypoints(const units::CartesianPosition::type& initialPos,
+    																			const units::CartesianPosition::type& finalPos, double offset);
 
 };
