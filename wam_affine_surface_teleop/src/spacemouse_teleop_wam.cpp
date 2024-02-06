@@ -9,14 +9,15 @@
 #include "spacemouse_teleop_wam.h"
 
 // Templated Initialization Function
-template<size_t DOF>
-void JoytoWAM<DOF>::init(ProductManager& pm){  
+template <size_t DOF>
+void JoytoWAM<DOF>::init(ProductManager& pm)
+{
+    // Initialize member variables
     a = 0.0;
     b = 0.0;
-
     R1 = Eigen::MatrixXd::Identity(2, 2);
 
-    motion_dir = true;
+    bases_joy_corresponding = true;
     bases_changed = true;
     start_teleop = false;
 
@@ -46,13 +47,16 @@ void JoytoWAM<DOF>::init(ProductManager& pm){
     systems_connected = false;
     force_estimated = false;
   
+    // Log DOF information
     ROS_INFO("%zu-DOF WAM", DOF);
+
+    // Get home joint positions and set up WAM
     jp_home = wam.getJointPositions();
-    wam.gravityCompensate(true); // gravity compensation default set to true
+    wam.gravityCompensate(true);
     pm.getSafetyModule()->setVelocityLimit(1.5);
 
-    // setting up WAM joint state publisher
-    const char* wam_jnts[] = {  
+    // Setting up WAM joint state publisher
+    const char* wam_jnts[] = {
         "wam/YawJoint",
         "wam/ShoulderPitchJoint",
         "wam/ShoulderYawJoint",
@@ -60,33 +64,51 @@ void JoytoWAM<DOF>::init(ProductManager& pm){
         "wam/UpperWristYawJoint",
         "wam/UpperWristPitchJoint",
         "wam/LowerWristYawJoint"};
-    std::vector < std::string > wam_joints(wam_jnts, wam_jnts + 7);
+
+    std::vector<std::string> wam_joints(wam_jnts, wam_jnts + 7);
     wam_joint_state.name = wam_joints;
     wam_joint_state.name.resize(DOF);
     wam_joint_state.position.resize(DOF);
     wam_joint_state.velocity.resize(DOF);
     wam_joint_state.effort.resize(DOF);
-    wam_jacobian_mn.data.resize(DOF*6);
+    wam_jacobian_mn.data.resize(DOF * 6);
 
     // ROS services
     go_home_srv = n_.advertiseService("go_home", &JoytoWAM::goHomeCallback, this);
     joint_move_block_srv = n_.advertiseService("joint_move_block", &JoytoWAM::jointMoveBlockCallback, this);
-    calibrartion_srv = n_.advertiseService("calibrartion", &JoytoWAM<DOF>::calibration, this);
+    calibration_srv = n_.advertiseService("calibration", &JoytoWAM<DOF>::calibration, this);
     disconnect_systems_srv = n_.advertiseService("disconnect_systems", &JoytoWAM::disconnectSystems, this);
     contact_control_teleop_srv = n_.advertiseService("contact_control_teleop", &JoytoWAM::contactControlTeleop, this);
 
-
     // ROS publishers
-    wam_joint_state_pub = n_.advertise < sensor_msgs::JointState > ("joint_states", 1);
-    wam_pose_pub = n_.advertise < geometry_msgs::PoseStamped > ("pose", 1);
-    wam_jacobian_mn_pub = n_.advertise < wam_msgs::MatrixMN > ("jacobian",1);
-    wam_tool_pub = n_.advertise < wam_msgs::RTToolInfo > ("tool_info",1);
-    wam_estimated_contact_force_pub = n_.advertise < wam_msgs::RTCartForce > ("static_estimated_force",1);
-    
+    initPublisher<sensor_msgs::JointState>(wam_joint_state_pub, "joint_states", 1);
+    initPublisher<geometry_msgs::PoseStamped>(wam_pose_pub, "pose", 1);
+    initPublisher<wam_msgs::MatrixMN>(wam_jacobian_mn_pub, "jacobian", 1);
+    initPublisher<wam_msgs::RTToolInfo>(wam_tool_pub, "tool_info", 1);
+    initPublisher<wam_msgs::RTCartForce>(wam_estimated_contact_force_pub, "static_estimated_force", 1);
+
     // ROS subscribers
     joy_sub_ = n_.subscribe("/spacenav/joy", 1, &JoytoWAM::joyCallback, this);
 
-    // CONNECT SPRING SYSTEM //TODO: check if its okay to connect here.
+    // Connect Spring System
+    connectSystems();
+
+    ROS_INFO("WAM services now advertised");
+    ros::AsyncSpinner spinner(0);
+    spinner.start();
+}
+
+template <size_t DOF>
+template <typename T>
+void JoytoWAM<DOF>::initPublisher(ros::Publisher& publisher, const std::string& topic_name, uint32_t queue_size)
+{
+    publisher = n_.advertise<T>(topic_name, queue_size);
+}
+
+template <size_t DOF>
+void JoytoWAM<DOF>::connectSystems()
+{
+    // Add initial connections here
     systems::forceConnect(KxSet.output, ImpControl.KxInput);
     systems::forceConnect(DxSet.output, ImpControl.DxInput);
     systems::forceConnect(XdSet.output, ImpControl.XdInput);
@@ -94,68 +116,59 @@ void JoytoWAM<DOF>::init(ProductManager& pm){
     systems::forceConnect(OrnKxSet.output, ImpControl.OrnKpGains);
     systems::forceConnect(OrnDxSet.output, ImpControl.OrnKdGains);
     systems::forceConnect(OrnXdSet.output, ImpControl.OrnReferenceInput);
-    
+
     systems::forceConnect(wam.toolPosition.output, ImpControl.CpInput);
     systems::forceConnect(wam.toolVelocity.output, ImpControl.CvInput);
     systems::forceConnect(wam.toolOrientation.output, ImpControl.OrnInput);
 
     systems::forceConnect(wam.kinematicsBase.kinOutput, ImpControl.kinInput);
     systems::forceConnect(wam.kinematicsBase.kinOutput, toolforce2jt.kinInput);
-    systems::forceConnect(wam.kinematicsBase.kinOutput, tt2jt_ortn_split.kinInput); 
+    systems::forceConnect(wam.kinematicsBase.kinOutput, tt2jt_ortn_split.kinInput);
 
     systems::forceConnect(ImpControl.CFOutput, toolforce2jt.input);
     systems::forceConnect(ImpControl.CTOutput, tt2jt_ortn_split.input);
     systems::forceConnect(FeedFwdForce.output, toolforcefeedfwd2jt.input);
-
-    //Connect Force Estimation systems //TODO: Check the force topic.
-    systems::connect(wam.kinematicsBase.kinOutput, getWAMJacobian.kinInput);
-    systems::connect(getWAMJacobian.output, staticForceEstimator.Jacobian);
-
-    systems::connect(wam.kinematicsBase.kinOutput, gravityTerm.kinInput);
-    systems::connect(gravityTerm.output, staticForceEstimator.g);
-
-    systems::connect(wam.jtSum.output, staticForceEstimator.jtInput);
-    systems::connect(staticForceEstimator.cartesianForceOutput, print.input);
-
-
-    ROS_INFO("WAM services now advertised");
-    ros::AsyncSpinner spinner(0);
-    spinner.start();
 }
 
 // Templated Surface Calibration Function
 template<size_t DOF>
-bool JoytoWAM<DOF>::calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res){   
+bool JoytoWAM<DOF>::calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::Response &res) {
+    // Define constants and systems
+    const double T_s = mypm->getExecutionManager()->getPeriod();
+    const int loggingRateMultiplier = 10;
     systems::Ramp time(mypm->getExecutionManager());
     systems::TupleGrouper<double, cp_type, jp_type> configLogTg;
-    const double T_s = mypm->getExecutionManager()->getPeriod();
 
+    // Create a temporary file for logging
     char tmpFile[] = "/tmp/btXXXXXX";
-	if (mkstemp(tmpFile) == -1) {
-		printf("ERROR: Couldn't create temporary file!\n");
-		return false;
-	}
+    if (mkstemp(tmpFile) == -1) {
+        ROS_ERROR("Couldn't create temporary file!");
+        return false;
+    }
 
+    // Define file paths
     std::string path_trj = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/joyToWamCalib/" + req.path + "Trj";
     std::string path_pnts = "/home/wam/catkin_ws/src/wam_hybrid_control/.data/" + req.path + "Pts";
 
     // Record at 1/10th of the loop rate
     systems::PeriodicDataLogger<config_sample_type> configLogger(
         mypm->getExecutionManager(),
-        new barrett::log::RealTimeWriter<config_sample_type>(tmpFile, 10*T_s),
-        10);
+        new barrett::log::RealTimeWriter<config_sample_type>(tmpFile, loggingRateMultiplier * T_s),
+        loggingRateMultiplier);
 
-    std::cout<< "Move the robot to the first contact point and Press [Enter]."<<std::endl;
+    // Record the first point
+    std::cout << "Move the robot to the first contact point and press [Enter]." << std::endl;
     waitForEnter();
     p1 = wam.getToolPosition();
     P1 = wam.getJointPositions();
     pts.col(0) = p1;
 
-    {   
+    {
         // Make sure the Systems are connected on the same execution cycle
         // that the time is started. Otherwise we might record a bunch of
         // samples all having t=0; this is bad because the Spline requires time
         // to be monotonic.
+        // Connect systems on the same execution cycle as starting time
         BARRETT_SCOPED_LOCK(mypm->getExecutionManager()->getMutex());
         connect(time.output, configLogTg.template getInput<0>());
         connect(wam.toolPosition.output, configLogTg.template getInput<1>());
@@ -164,18 +177,21 @@ bool JoytoWAM<DOF>::calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::
         time.start();
     }
 
-    std::cout<< "Move the robot on the surface to the second  point and Press [Enter]."<<std::endl;
+    // Record the second point
+    std::cout << "Move the robot on the surface to the second point and press [Enter]." << std::endl;
     waitForEnter();
     p2 = wam.getToolPosition();
     P2 = wam.getJointPositions();
     pts.col(1) = p2;
 
-    std::cout<< "Move the robot on to the third point and Press [Enter]."<<std::endl;
+    // Record the third point
+    std::cout << "Move the robot onto the third point and press [Enter]." << std::endl;
     waitForEnter();
     p3 = wam.getToolPosition();
     P3 = wam.getJointPositions();
     pts.col(2) = p3;
 
+    // Close the logger
     configLogger.closeLog();
     disconnect(configLogger.input);
 
@@ -185,38 +201,34 @@ bool JoytoWAM<DOF>::calibration(wam_srvs::Teach::Request &req, wam_srvs::Teach::
         return false;
     }
 
+    // Export data to CSV file
     log::Reader<config_sample_type> lr(tmpFile);
 	lr.exportCSV(outputFile);
     std::remove(tmpFile);
-    outputFile.close();
 
+    // Write the matrix to the CSV file
     std::ofstream outputFile2(path_pnts);
     if (!outputFile2.is_open()) {
-        printf("ERROR: Couldn't create the file!\n");
+        ROS_ERROR("Couldn't create the file!");
         return false;
     }
 
-    // Write the matrix to the CSV file
     for (int i = 0; i < pts.rows(); ++i) {
         for (int j = 0; j < pts.cols(); ++j) {
-            // Use a comma as a delimiter
             outputFile2 << pts(i, j);
-
-            // Add a comma for all but the last element in a row
             if (j < pts.cols() - 1) {
                 outputFile2 << ",";
             }
         }
-        // Start a new line after each row
         outputFile2 << std::endl;
     }
     outputFile2.close();
 
-    surface_normal = ((p2-p1).cross(p3-p2));
-    surface_normal.normalize();
-    std::cout<<"Surface normal: "<< surface_normal << std::endl;   
-    
-    ROS_INFO_STREAM("Calibration finished. Press [Enter] to go home.");
+    // Compute surface normal
+    surface_normal = ((p2 - p1).cross(p3 - p2)).normalized();
+    ROS_INFO_STREAM("Surface normal: " << surface_normal);
+
+    ROS_INFO("Calibration finished. Press [Enter] to go home.");
     waitForEnter();
     goHome();
 
@@ -240,26 +252,16 @@ void JoytoWAM<DOF>::joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
         right button,
     ]*/
     if(start_teleop){
-        curr_button_stats_ = msg->buttons;
-
-        for (std::size_t i = 0; i < curr_button_stats_.size(); ++i) {
-            pressedButtons[i] = (!prev_button_stats_[i] && curr_button_stats_[i]);  // True if the button is pressed in the current state but not in the previous state
-        }
-        
-        prev_button_stats_ = curr_button_stats_;
+        updateButtonStatus(msg->buttons);
 
         for (std::size_t i = 0; i < speed_multiplier_.size(); ++i) {
                 speed_divider_[i] /= speed_multiplier_[i];
             }
-
-        if (pressedButtons[0]) {
-            scaleArray(speed_scale_, speed_divider_);
-        } else if (pressedButtons[1]) {
-            scaleArray(speed_scale_, speed_multiplier_);
-        }
+    
+        adjustSpeedScale();
         
         R = findingRotationMatrix((p2-p1), (p3-p2));
-        joy_axis << msg->axes[0], msg->axes[1], msg->axes[2];
+        joy_axis << msg->axes[0], msg->axes[1];
         rotated_joy_axis = R * joy_axis.segment(0, 2);
 
         a += rotated_joy_axis[0] * speed_scale_[0];
@@ -269,20 +271,24 @@ void JoytoWAM<DOF>::joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
         /*a = msg->axes[0] * speed_scale_[0];
         b = msg->axes[1] * speed_scale_[1];*/
 
-
-        if (a > 1){a = 1;} else if (a < -1) {a = -1;}
-        if (b > 1){b = 1;} else if (b < -1) {b = -1;}
-        
+        limitValues(a, -1, 1);
+        limitValues(b, -1, 1);
         
         if(abs(msg->axes[0]) >= 0.01 || abs(msg->axes[1]) >= 0.01){
-            if(motion_dir){p4 = p3 + (a/(p2-p1).norm())*(p2-p1) + (b/(p3-p2).norm())*(p3-p2);}
-            else { p4 = p3 + (b/(p2-p1).norm())*(p2-p1) + (a/(p3-p2).norm())*(p3-p2);}
+            if(bases_joy_corresponding){
+                p4 = p3 + (a/(p2-p1).norm())*(p2-p1) + (b/(p3-p2).norm())*(p3-p2);
+            } else { 
+                p4 = p3 + (b/(p2-p1).norm())*(p2-p1) + (a/(p3-p2).norm())*(p3-p2);
+            }
+
             // Add the received pose to the list
             geometry_msgs::PoseStamped new_pose;
             new_pose.pose.position.x = p4[0];
             new_pose.pose.position.y = p4[1];
             new_pose.pose.position.z = p4[2];
-            betha = angleBetweenVectors((p3-p2),(p4-p3));  
+
+            betha = angleBetweenVectors((p3-p2),(p4-p3)); 
+
             if ((p4-p3).norm() >= 0.2  && abs(betha) >=0.5 && abs(betha) <= 2.62) {
                 std::cout<<betha<<std::endl; 
                 ROS_INFO("Bases Changed.");
@@ -296,6 +302,19 @@ void JoytoWAM<DOF>::joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
         }     
     }
 }
+
+// Helper Function to Update Button Status
+template<size_t DOF>
+void JoytoWAM<DOF>::updateButtonStatus(const std::vector<int>& buttons) {
+    curr_button_stats_ = buttons;
+
+    for (std::size_t i = 0; i < curr_button_stats_.size(); ++i) {
+        pressedButtons[i] = (!prev_button_stats_[i] && curr_button_stats_[i]);  // True if the button is pressed in the current state but not in the previous state
+    }
+
+    prev_button_stats_ = curr_button_stats_;
+}
+
 template<size_t DOF>
 void JoytoWAM<DOF>::scaleArray(std::vector<double>& array, const std::vector<double>& scale) {
     // Check if the sizes of the input vector and the scaling factor vector match
@@ -309,100 +328,88 @@ void JoytoWAM<DOF>::scaleArray(std::vector<double>& array, const std::vector<dou
     }
 }
 
+// Helper Function to Adjust Speed Scale
+template<size_t DOF>
+void JoytoWAM<DOF>::adjustSpeedScale() {
+    for (std::size_t i = 0; i < speed_scale_.size(); ++i) {
+        speed_scale_[i] = (pressedButtons[0]) ? (speed_scale_[i] / speed_divider_[i]) : (speed_scale_[i] * speed_multiplier_[i]);
+    }
+}
+
+// Helper Function to Limit Values
+template<size_t DOF>
+void JoytoWAM<DOF>::limitValues(float& value, double min, double max) {
+    if (value > max) {
+        value = max;
+    } else if (value < min) {
+        value = min;
+    }
+}
+
 template<size_t DOF>
 Eigen::Matrix2d JoytoWAM<DOF>::findingRotationMatrix(const Eigen::Vector3d& vector1, const Eigen::Vector3d& vector2){
+    // Initialize coordinate axes
     x_axis << 1, 0, p1(2);
     y_axis << 0, 1, p1(2);
     x_naxis << -1, 0, p1(2);
     y_naxis << 0, -1, p1(2);
     
-    theta_vec << angleBetweenVectors(x_axis,vector1) , angleBetweenVectors(x_axis,vector2), angleBetweenVectors(x_naxis,vector1), angleBetweenVectors(x_naxis,vector2);
-    std::cout<<minAbsElement(theta_vec) + 1<<std::endl;
-    switch (minAbsElement(theta_vec)){
-        case 0:
-            //v1 near x, v2 near y or-y
-            motion_dir = true;
+    // Calculate angles
+    theta_vec << angleBetweenVectors(x_axis,vector1) , angleBetweenVectors(x_axis,vector2), 
+                 angleBetweenVectors(x_naxis,vector1), angleBetweenVectors(x_naxis,vector2);
+
+    
+    // Determine base and rotation
+    int thetaMinIndex = minAbsElement(theta_vec);
+    bases_joy_corresponding = (thetaMinIndex == 0 || thetaMinIndex == 2);
+
+    switch (thetaMinIndex) {
+        case 0: // v1 near x, v2 near y or -y
             ROS_INFO("1.");
-            gamma_vec << angleBetweenVectors(y_axis,vector2) , angleBetweenVectors(y_naxis,vector2);
-            
+            gamma_vec << angleBetweenVectors(y_axis, vector2), angleBetweenVectors(y_naxis, vector2);
             if (minAbsElement(gamma_vec) == 1) {
-
-                R1(0,0) = 1;
-                R1(0,1) = 0;
-                R1(1,0) = 0;
-                R1(1,1) = -1;
-                ROS_INFO("1n.");
+                R1 << 1, 0, 0, -1;
+                ROS_INFO("n.");
             }
-            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
             break;
-        
-        case 1:
-            //v2 near x, v1 near y or -y
-            motion_dir = false;
+
+        case 1: // v2 near x, v1 near y or -y
             ROS_INFO("2.");
-            gamma_vec << angleBetweenVectors(y_axis,vector1) , angleBetweenVectors(y_naxis,vector1);
-            
+            gamma_vec << angleBetweenVectors(y_axis, vector1), angleBetweenVectors(y_naxis, vector1);
             if (minAbsElement(gamma_vec) == 1) {
+                R1 << 1, 0, 0, -1;
+                ROS_INFO("n.");
+            }
+            break;
 
-                R1(0,0) = 1;
-                R1(0,1) = 0;
-                R1(1,0) = 0;
-                R1(1,1) = -1;
-                ROS_INFO("2n.");
-            }
-            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
-            break;
-        
-        case 2:
-            //v1 near -x, v2 near y or -y
-            motion_dir = true;
+        case 2: // v1 near -x, v2 near y or -y
             ROS_INFO("3.");
-            gamma_vec << angleBetweenVectors(y_axis,vector2) , angleBetweenVectors(y_naxis,vector2);
-            
-            if (minAbsElement(gamma_vec) == 0){
-                R1(0,0) = -1;
-                R1(0,1) = 0;
-                R1(1,0) = 0;
-                R1(1,1) = 1;
-                ROS_INFO("3n.");
+            gamma_vec << angleBetweenVectors(y_axis, vector2), angleBetweenVectors(y_naxis, vector2);
+            if (minAbsElement(gamma_vec) == 0) {
+                R1 << -1, 0, 0, 1;
+                ROS_INFO("n.");
             } else {
-                R1(0,0) = -1;
-                R1(0,1) = 0;
-                R1(1,0) = 0;
-                R1(1,1) = -1;
-                ROS_INFO("3nn.");
+                R1 << -1, 0, 0, -1;
+                ROS_INFO("nn.");
             }
-            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
             break;
-        
-        case 3:
-            //v2 near -x 
-            motion_dir = false;
+
+        case 3: // v2 near -x
             ROS_INFO("4.");
-            gamma_vec << angleBetweenVectors(y_axis,vector1) , angleBetweenVectors(y_naxis,vector1);
-            
-            if (minAbsElement(gamma_vec) == 0){
-                
-                R1(0,0) = -1;
-                R1(0,1) = 0;
-                R1(1,0) = 0;
-                R1(1,1) = 1;
-                ROS_INFO("4n.");
+            gamma_vec << angleBetweenVectors(y_axis, vector1), angleBetweenVectors(y_naxis, vector1);
+            if (minAbsElement(gamma_vec) == 0) {
+                R1 << -1, 0, 0, 1;
+                ROS_INFO("n.");
             } else {
-                
-                R1(0,0) = -1;
-                R1(0,1) = 0;
-                R1(1,0) = 0;
-                R1(1,1) = -1;
-                ROS_INFO("4nn.");
+                R1 << -1, 0, 0, -1;
+                ROS_INFO("nn.");
             }
-            alpha = (theta_vec(minAbsElement(theta_vec)) + gamma_vec(minAbsElement(gamma_vec)))*0.5;
             break;
     }
-    R2(0,0) = cos(alpha);
-    R2(0,1) = sin(alpha); //the signs should be reverse but for unknown reasons it seams like it works better this way!!!
-    R2(1,0) = -sin(alpha);
-    R2(1,1) = cos(alpha);
+
+    alpha = (theta_vec(thetaMinIndex) + gamma_vec(minAbsElement(gamma_vec))) * 0.5;
+    R2 << cos(alpha), sin(alpha),
+          -sin(alpha), cos(alpha); //I think sin signs should be reverse.
     
     R = R2*R1;
     
@@ -412,30 +419,25 @@ Eigen::Matrix2d JoytoWAM<DOF>::findingRotationMatrix(const Eigen::Vector3d& vect
 
 template<size_t DOF>
 int JoytoWAM<DOF>::minAbsElement(const Eigen::VectorXd& angleVector){
-    // Calculate the minimum absolute element
     double minAbsElement = angleVector.array().abs().minCoeff();
 
-    // Find the index of the minimum absolute element
     int minAbsIndex = -1;
     for (int i = 0; i < angleVector.size(); ++i) {
         if (std::abs(angleVector(i)) == minAbsElement) {
-            minAbsIndex = i;
+            minAbsIndex = i; // what if twi elemnt have the min: not possible?
             break;
         }
     }
 
     return minAbsIndex;
 }
+
 template<size_t DOF>
 // Function to calculate the angle and direction between two vectors (from first to second vector)
 double JoytoWAM<DOF>::angleBetweenVectors(const Eigen::Vector3d& vector1, const Eigen::Vector3d& vector2) {
-    // Calculate the cross product
     Eigen::Vector3d crossProduct = vector1.cross(vector2);
-
-    // Calculate the angle
     double angle = std::atan2(crossProduct.norm(), vector1.dot(vector2));
 
-    // Determine the direction of the angle using the sign of the components of the cross product
     if (crossProduct(2) < 0) {
         angle = -angle;
     }
@@ -514,11 +516,14 @@ bool JoytoWAM<DOF>::contactControlTeleop(wam_srvs::ContactControlTeleop::Request
         std::cout<< "Press [Enter] to start navigating the WAM on the surface with SpaceMouse."<<std::endl;
         waitForEnter();
         start_teleop = true;
+
         return true;
+
     } else {
         start_teleop = false;
         a = 0;
         b = 0;
+
         return true;
     } 
 }
@@ -801,6 +806,20 @@ void JoytoWAM<DOF>::publishWam(ProductManager& pm)
 
 }
 
+template <size_t DOF>
+typename units::JointTorques<DOF>::type saturateJt(const typename units::JointTorques<DOF>::type& x,
+                                                   const typename units::JointTorques<DOF>::type& limit) {
+    int index;
+    double minRatio;
+
+    minRatio = limit.cwiseQuotient(x.cwiseAbs()).minCoeff(&index);
+
+    if (minRatio < 1.0) {
+        return minRatio * x;
+    } else {
+        return x;
+    }
+};
 
 //wam_main Function
 template<size_t DOF>
