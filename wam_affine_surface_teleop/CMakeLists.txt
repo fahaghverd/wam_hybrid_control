@@ -41,6 +41,7 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
+
 catkin_package(
   LIBRARIES
   CATKIN_DEPENDS
@@ -57,7 +58,13 @@ catkin_package(
 
 add_executable(spacemouse_teleop_rviz src/spacemouse_teleop_rviz.cpp)
 target_link_libraries(spacemouse_teleop_rviz ${catkin_LIBRARIES})
- 
+
+add_executable(spacemouse_teleop_rviz+wam src/spacemouse_teleop_rviz+wam.cpp)
+target_link_libraries(spacemouse_teleop_rviz+wam ${catkin_LIBRARIES})
+
+add_executable(visualizing_wam_data src/visualizing_wam_data.cpp)
+target_link_libraries(visualizing_wam_data ${catkin_LIBRARIES})
+
 add_executable(spacemouse_teleop_wam src/spacemouse_teleop_wam.cpp)
 target_link_libraries(spacemouse_teleop_wam ${catkin_LIBRARIES} barrett ${GSL_LIBRARY} config++)
 

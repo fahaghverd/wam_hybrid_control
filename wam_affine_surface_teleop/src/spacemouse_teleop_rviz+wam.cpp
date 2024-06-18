@@ -7,15 +7,15 @@
  * Author: Faezeh
  */
 
-#include "spacemouse_teleop_rviz.h"
+#include "spacemouse_teleop_rviz+wam.h"
 
 void JoyToMovementPrimitives::init(){
     //initializing rviz params.
-    p1 << 0.00, 0.00, 0.15;
+    p1 << 0.00, 0.00, 0.15; // read these from wam!
     p2 << 0.2, 0.1, 0.15;
-    p3 << 0.1, 0.2, 0.15;
-    p4 << 0.0, 0.0, 0.0;
-    // R1 = Eigen::MatrixXd::Identity(2, 2);
+    // p4 << 0.0, 0.0, 0.0;
+
+    cart_mag =0.05;
 
     // Set the orientation using a quaternion
     defaultQuat.x = 0.0;
@@ -51,18 +51,44 @@ void JoyToMovementPrimitives::init(){
     
     prev_button_stats_ = {0, 0};
     pressedButtons = {0, 0};
+    
+    cart_publish = ortn_publish = false; // Setting publisher states to false 
+    
+    //ROS Services
+    // calibration_srv = n_.advertiseService("calibration", &JoyToMovementPrimitives::calibration, this);
+
+    // //Service Clients
+    // cart_imp_move_client = n_.serviceClient<wam_srvs::JointMoveBlock>("/wam/cp_impedance_control");
 
     //Initializing publishers
     table_marker_pub_ = n_.advertise<visualization_msgs::Marker>("table_marker", 1, true);
     line_marker_pub_ = n_.advertise<visualization_msgs::Marker>("line_marker", 1, true);
     base_line_marker_pub_ = n_.advertise<visualization_msgs::Marker>("base_line_marker", 1, true);
-    pose_marker_pub_ = n_.advertise<visualization_msgs::Marker>("pose_markers", 1, true);
+    wam_pos_marker_pub_ = n_.advertise<visualization_msgs::Marker>("wam_pose_markers", 1, true);
+    // pose_marker_pub_ = n_.advertise<visualization_msgs::Marker>("pose_markers", 1, true);
+    
+    // WAM Publishers
+    cart_vel_pub = n_.advertise<wam_msgs::RTCartVel>("cart_vel_cmd", 1);         // /wam/cart_vel_cmd
+    ortn_vel_pub = n_.advertise<wam_msgs::RTOrtnVel>("ortn_vel_cmd", 1);         // /wam/ortn_vel_cmd
 
+    //Initializing subscribers
     joy_sub_ = n_.subscribe("/spacenav/joy", 1, &JoyToMovementPrimitives::joyCallback, this);
+    // wam_joint_states_sub_ = n_.subscribe("/wam/joint_states", 1, &JoyToMovementPrimitives::wamJointCallback, this);
+    wam_pose_sub_ = n_.subscribe("/wam/pose", 1, &JoyToMovementPrimitives::wamPosCallback, this);
 
+    p3 = wamPos;
     drawTable(50,50);
-    drawPoses();
     drawBasePoses();   
+}
+
+void JoyToMovementPrimitives::wamPosCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
+    wamPos << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
+    wamOrt.x() = msg->pose.orientation.x;
+    wamOrt.y() = msg->pose.orientation.y;
+    wamOrt.z() = msg->pose.orientation.z;
+    wamOrt.w() = msg->pose.orientation.w;
+
+    drawWAMPoses();
 }
 
 void JoyToMovementPrimitives::joyCallback(const sensor_msgs::Joy::ConstPtr& msg) {
@@ -80,7 +106,22 @@ void JoyToMovementPrimitives::joyCallback(const sensor_msgs::Joy::ConstPtr& msg)
         left button,(
         right button,
     ]*/
-    
+    cart_publish = ortn_publish = false;
+
+    p4 = wamPos;
+    betha = angleBetweenVectors((p3-p2),(p4-p3));  
+
+    if ((p4-p3).norm() >= 0.05  && abs(betha) >=0.7 && abs(betha) <= 2.44 && abs((p4-p3).norm() - (p3-p2).norm()) < 0.02){ // I should add a condtion to not change bases if we ARE moving in straight line!
+        std::cout<<betha<<std::endl; 
+        ROS_INFO("Bases Changed.");
+        p1 = p2;
+        p2 = p3;
+        p3 = p4;
+        a << 0.0,0.0,0.0;
+        b << 0.0,0.0,0.0;
+        //reset the speed as well
+    }
+
     curr_button_stats_ = msg->buttons;
 
     for (std::size_t i = 0; i < curr_button_stats_.size(); ++i) {
@@ -88,11 +129,6 @@ void JoyToMovementPrimitives::joyCallback(const sensor_msgs::Joy::ConstPtr& msg)
     }
      
     prev_button_stats_ = curr_button_stats_;
-
-    for (std::size_t i = 0; i < speed_multiplier_.size(); ++i) {
-        speed_divider_[i] /= speed_multiplier_[i];
-    }
-
 
     if (pressedButtons[0]) {
         scaleArray(speed_scale_, speed_divider_);
@@ -108,8 +144,14 @@ void JoyToMovementPrimitives::joyCallback(const sensor_msgs::Joy::ConstPtr& msg)
     a += projectVector(joy_axis, v1) * speed_scale_[0];
     b += projectVector(joy_axis, v2) * speed_scale_[1];    
     
+
     if(abs(msg->axes[0]) >= 0.01 || abs(msg->axes[1]) >= 0.01){
         p4 =  p3 + a + b;
+
+        req_veldir[0] = p4.normalized()[0];
+        req_veldir[1] = p4.normalized()[1];
+        req_veldir[2] = 0.0;
+        cart_publish = true;
 
         // Add the received pose to the list
         geometry_msgs::PoseStamped new_pose;
@@ -119,23 +161,14 @@ void JoyToMovementPrimitives::joyCallback(const sensor_msgs::Joy::ConstPtr& msg)
         new_pose.pose.orientation = defaultQuat;
         poses.push_back(new_pose); 
 
-        betha = angleBetweenVectors((p3-p2),(p4-p3));  
-
-        if ((p4-p3).norm() >= 0.05  && abs(betha) >=0.7 && abs(betha) <= 2.44 && abs((p4-p3).norm() - (p3-p2).norm()) < 0.01){ // I should add a condtion to not change bases if we ARE moving in straight line!
-            std::cout<<betha<<std::endl; 
-            ROS_INFO("Bases Changed.");
-            p1 = p2;
-            p2 = p3;
-            p3 = p4;
-            a << 0.0,0.0,0.0;
-            b << 0.0,0.0,0.0;
-            //reset the speed as well
-        }
-
+    } else {
+        req_veldir = {0.0 , 0.0 , 0.0};
     }
     
+    //Vel pub prepare
+
     // Publish the updated poses and connecting lines
-    publishPoses();
+    // publishPoses();
     drawPoses();
     drawBasePoses(); 
        
@@ -286,38 +319,61 @@ void JoyToMovementPrimitives::drawBasePoses() {
     // ROS_INFO("Arrows Published.");
 }
 
-void JoyToMovementPrimitives::publishPoses() {
-    // Create a Marker message for each pose
-    visualization_msgs::Marker marker;
-    marker.header.frame_id = "world";  // Change the frame_id according to your setup
-    marker.header.stamp = ros::Time::now();
-    marker.ns = "pose_markers";
-    marker.type = visualization_msgs::Marker::POINTS;
-    marker.action = visualization_msgs::Marker::ADD;
-    marker.scale.x = 0.005;
-    marker.scale.y = 0.005;
-    marker.color.r = 1.0;
-    marker.color.g = 0.0;
-    marker.color.b = 0.0;
-    marker.color.a = 1.0;
+void JoyToMovementPrimitives::drawWAMPoses() {
+    // Create a Marker message for connecting lines between poses
+    visualization_msgs::Marker wam_pos_marker;
+    wam_pos_marker.header.frame_id = "world";  
+    wam_pos_marker.header.stamp = ros::Time::now();
+    wam_pos_marker.ns = "wam_pos_markers";
+    wam_pos_marker.id = 1;
+    wam_pos_marker.type = visualization_msgs::Marker::POINTS;
+    wam_pos_marker.action = visualization_msgs::Marker::ADD;
+    wam_pos_marker.scale.x = 0.01;  
+    wam_pos_marker.scale.y = 0.01;
 
-    for (const auto& pose : poses) {
-        marker.points.push_back(pose.pose.position);
-    }
+    // Set color
+    wam_pos_marker.color.r = 0.0;
+    wam_pos_marker.color.g = 0.0;
+    wam_pos_marker.color.b = 1.0;
+    wam_pos_marker.color.a = 1.0;
 
-    // Publish the marker
-    pose_marker_pub_.publish(marker);
-    //ROS_INFO("Poses Published.");
+    wam_pos.x = wamPos[0];
+    wam_pos.y = wamPos[1];
+    wam_pos.z = wamPos[2];
+    wam_pos_marker.points.push_back(wam_pos);
+
+    // Publish the line marker
+    wam_pos_marker_pub_.publish(wam_pos_marker);
+    //ROS_INFO("Lines Published.");
 }
 
+// Function for updating the commands and publishing
+void JoyToMovementPrimitives::update()
+{
+    //Check our published cartesian velocity state and act accordingly
+    if(cart_publish && !ortn_publish) // if only cart_publish state is set
+    {
+        cart_vel.direction[0] = req_veldir[0];
+        cart_vel.direction[1] = req_veldir[1];
+        cart_vel.direction[2] = req_veldir[2];
+        cart_vel.magnitude = cart_mag;
+        cart_vel_pub.publish(cart_vel);
+    }
+    
+}
 int main(int argc, char** argv) {
     ros::init(argc, argv, "spacemouse_teleop_rviz");
 
     JoyToMovementPrimitives joy_teleop;
-
     joy_teleop.init();
 
-    ros::spin();
+    ros::Rate pub_rate(CNTRL_FREQ);
+    while (joy_teleop.n_.ok()) // Looping at the specified frequency while our ros node is ok
+    {
+        ros::spinOnce();
+        joy_teleop.update(); // Update and send commands to the WAM
+        pub_rate.sleep();
+    }
 
     return 0;
 }

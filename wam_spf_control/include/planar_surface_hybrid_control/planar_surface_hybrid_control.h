@@ -205,6 +205,10 @@ class PlanarHybridControl
 		void CartImpController(std::vector<cp_type> &Trajectory, int step = 1, const cp_type &KpApplied = Eigen::Vector3d::Zero(), const cp_type &KdApplied = Eigen::Vector3d::Zero(),
                                                  bool orientation_control = false, const cp_type &OrnKpApplied = Eigen::Vector3d::Zero(), const cp_type &OrnKdApplied = Eigen::Vector3d::Zero(),
                                                  bool ext_force = false, const cf_type &des_force = Eigen::Vector3d::Zero(), bool null_space = false);         
+		Eigen::Matrix3d computeDesiredRotationMatrix(const Eigen::Vector3d& surfaceNormal);
+        	bool areOrientationsDifferent(const Eigen::Quaterniond& q1, const Eigen::Quaterniond& q2);
+        	std::vector<Eigen::Quaterniond> generateQuaternionWaypoints(const Eigen::Quaterniond& start, const Eigen::Quaterniond& end, int numWaypoints);
+
 		//void findLinearlyIndependentVectors(ProductManager& pm);
 
 

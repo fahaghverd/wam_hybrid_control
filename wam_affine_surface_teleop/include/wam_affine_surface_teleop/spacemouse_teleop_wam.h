@@ -104,7 +104,7 @@ public:
 
     float a, b;
     double theta, gamma, alpha, betha;
-    bool start_teleop, bases_changed, bases_joy_corresponding;
+    bool start_teleop, bases_changed, bases_joy_corresponding, new_pose_published;
 
     // Vectors for storing configuration parameters
     std::vector<double> speed_scale_, speed_multiplier_, speed_divider_;
@@ -232,6 +232,7 @@ public:
                               wam_srvs::ContactControlTeleop::Response& res);
     std::vector<units::CartesianPosition::type> generateCubicSplineWaypoints(
         const units::CartesianPosition::type& initialPos, const units::CartesianPosition::type& finalPos, double offset);
+    void updateRT(ProductManager& pm);
 };
 
 

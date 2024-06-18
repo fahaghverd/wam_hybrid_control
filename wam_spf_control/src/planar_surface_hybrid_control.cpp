@@ -279,18 +279,21 @@ bool PlanarHybridControl<DOF>::SPFCartImpCOntroller(wam_srvs::Play::Request &req
 
     //Impedance Control params
     cp_type KpApplied, KdApplied;
-    KpApplied << 100, 100, 100;
-    KdApplied << 20, 20, 20;
-    
+    KpApplied << 1200, 1200, 1200;
+    KdApplied << 30, 30, 30;
+
     //Moving to initial point
-    std::vector<units::CartesianPosition::type> waypoints = generateCubicSplineWaypoints(wam.getToolPosition(), initial_point, 0.0);
+    std::cout<< "Press [Enter] to move the robot to initial point."<<std::endl;
+    waitForEnter();
+    std::vector<units::CartesianPosition::type> waypoints = generateCubicSplineWaypoints(wam.getToolPosition(), initial_point, 0.5);
     //std::cout<<"initial_point:"<<initial_point<<std::endl;
-    CartImpController(waypoints, 1, KpApplied, KdApplied); //TODO Try if the function works.
 
     //Impedance Control params
     cp_type OrnKpApplied, OrnKdApplied;
-    OrnKpApplied << 10, 10, 10;
-    OrnKdApplied << 6, 6, 6;
+    OrnKpApplied << 5.50, 5.5, 5.5;
+    OrnKdApplied << 0.055, 0.055, 0.055;
+
+    CartImpController(waypoints, 1, KpApplied, KdApplied, true, OrnKpApplied, OrnKdApplied);
     
     cp_type projected_waypoint;
     cp_type waypoint;
@@ -351,44 +354,42 @@ void PlanarHybridControl<DOF>::CartImpController(std::vector<cp_type> &Trajector
     systems::forceConnect(jtSat.output, wam.input); 
 
     cp_type waypoint;
+    Eigen::Quaterniond rotation_waypoint;
     if(orientation_control){
+        // Find the desired rotation
         Eigen::Matrix3d Rotation;
-        for (int i = 0; i<Trajectory.size(); i+=step) {
-            // Find the desired rotation
-            Rotation = wam.getToolOrientation().toRotationMatrix();
-            Rotation.col(2) << surface_normal;
-            
-            // Ensure the resulting matrix is still a valid rotation matrix
-            Eigen::JacobiSVD<Eigen::MatrixXd> svd(Rotation, Eigen::ComputeFullU | Eigen::ComputeFullV);
-            Eigen::Matrix3d Rotation_des = svd.matrixU() * svd.matrixV().transpose();
-            std::cout<<Rotation<<std::endl;
-            // Check if the determinant is 1 to ensure it's a rotation matrix
-            if (Rotation_des.determinant() < 0) {
-                // If the determinant is -1, flip the sign of one of the singular vectors
-                Eigen::Matrix3d flipMatrix = Eigen::Matrix3d::Identity();
-                flipMatrix(2, 2) = -1;
-                Rotation_des = svd.matrixU() * flipMatrix * svd.matrixV().transpose();
-            }
+        //Rotation = computeDesiredRotationMatrix(surface_normal);
+        Rotation << -1, 0, 0,
+                    0, 1, 0,
+                    0, 0, -1;
+        // Convert Quaternion to Rotation Matrix
+        std::cout << "Rotation_des:" << Rotation << std::endl;
+        Eigen::Quaterniond des_orn(Rotation);
+        Eigen::Quaterniond cur_orn = wam.getToolOrientation();
+        std::vector<Eigen::Quaterniond> rotation_waypoints;
+        rotation_waypoints = generateQuaternionWaypoints(cur_orn, des_orn, Trajectory.size());
+        //XdSet.setValue(wam.getToolPosition());
 
-            // Convert Quaternion to Rotation Matrix
-            std::cout << "Rotation_des:" << Rotation_des << std::endl;
-            Eigen::Quaterniond quaternion_des(Rotation_des);
-            OrnXdSet.setValue(quaternion_des);
-            
+        for (int i = 0; i<Trajectory.size(); i+=step) {
             // Move to the waypoint
             waypoint = Trajectory[i];
+            rotation_waypoint = rotation_waypoints[i];
+            //rotation_waypoint =des_orn;
+            waypoint[2] = waypoint[2] - 0.01;
             std::cout<<i<<std::endl;
+            //std::cout<<"rotation waypoint:"<<rotation_waypoint.x()<<","<<rotation_waypoint.y()<<","<<rotation_waypoint.z()<<","<<rotation_waypoint.w()<<std::endl;
+            OrnXdSet.setValue(rotation_waypoint);
             XdSet.setValue(waypoint);
-            btsleep(0.5);
+            btsleep(0.25);
 
             cp_type e = (waypoint - wam.getToolPosition())/(waypoint.norm());
-            
+
             cp_type euler_angles = wam.getToolOrientation().toRotationMatrix().eulerAngles(2, 1, 0);
-            cp_type euler_angles_d = Rotation_des.eulerAngles(2, 1, 0);
-            cp_type Orne = (euler_angles_d - euler_angles)/(euler_angles_d.norm());
-            
-            if(e.norm() > 0.03) {std::cout<<"position error: %"<<e*100<<std::endl;}   
-            if(Orne.norm() > 0.03) {std::cout << "orientation error(zyx):"<<Orne* 180.0 / M_PI<< std::endl;}
+            cp_type euler_angles_d = Rotation.eulerAngles(2, 1, 0);
+            cp_type Orne = (euler_angles_d - euler_angles);
+
+            if(e.norm() > 0.01) {std::cout<<"position error: %"<<e*100<<std::endl;}
+            if(Orne.norm() > 0.5) {std::cout << "orientation error(zyx):"<<Orne* 180.0 / M_PI<< std::endl;}
         }
     }
     else{
@@ -396,13 +397,73 @@ void PlanarHybridControl<DOF>::CartImpController(std::vector<cp_type> &Trajector
         for (int i = 0; i<Trajectory.size(); i+=step) {
             // Move to the waypoint
             waypoint = Trajectory[i];
+            waypoint[2] = waypoint[2] - 0.02;
             XdSet.setValue(waypoint);
             btsleep(0.3);
             cp_type e = (waypoint - wam.getToolPosition())/(waypoint.norm());
-            if(e.norm() > 0.03) {std::cout<<e<<std::endl;}   
+            if(abs(e.norm()) > 0.01) {std::cout<<"position error: %"<<e*100<<std::endl;}
         }
     }
-    systems::disconnect(torqueSum.output);    
+    systems::disconnect(torqueSum.output);
+}
+
+// Function to check if two quaternions represent significantly different orientations
+template<size_t DOF>
+bool PlanarHybridControl<DOF>::areOrientationsDifferent(const Eigen::Quaterniond& q1, const Eigen::Quaterniond& q2) {
+    // Calculate the dot product between the two quaternions
+    double dot = q1.dot(q2);
+
+    // Ensure the dot product is within the range [-1, 1] to avoid numerical issues
+    dot = std::max(-1.0, std::min(1.0, dot));
+
+    // Calculate the angle (in radians) between the two quaternions
+    double angleRadians = 2 * acos(dot);
+
+    // Convert the angle to degrees
+    double angleDegrees = angleRadians * (180.0 / M_PI);
+
+     // Check if the angle exceeds the threshold
+     return angleDegrees > 10;
+ }
+
+
+template<size_t DOF>
+Eigen::Matrix3d PlanarHybridControl<DOF>::computeDesiredRotationMatrix(const Eigen::Vector3d& surfaceNormal) {
+        // Normalize the surface normal to ensure it is a unit vector
+        Eigen::Vector3d n_unit = surfaceNormal.normalized();
+
+        // Generate an arbitrary vector that is not parallel to n_unit
+        Eigen::Vector3d notParallel;
+        if (std::fabs(n_unit[0]) < std::fabs(n_unit[2])) {
+            notParallel = Eigen::Vector3d(1, 0, 0);
+        } else {
+            notParallel = Eigen::Vector3d(0, 0, 1);
+        }
+
+        // Compute the first perpendicular vector (x_unit) using cross product
+        Eigen::Vector3d x_unit = n_unit.cross(notParallel).normalized();
+
+        // Compute the second perpendicular vector (y_unit) using cross product
+        Eigen::Vector3d y_unit = n_unit.cross(x_unit).normalized();
+
+        // Construct the desired rotation matrix
+        Eigen::Matrix3d R;
+        R.col(0) = y_unit;
+        R.col(1) = x_unit;
+        R.col(2) = n_unit;
+
+        return R;
+}
+
+// Function to generate rotation waypoints between two rotations represented by quaternions
+template <size_t DOF>
+std::vector<Eigen::Quaterniond> PlanarHybridControl<DOF>::generateQuaternionWaypoints(const Eigen::Quaterniond& start, const Eigen::Quaterniond& end, int numWaypoints) {
+        std::vector<Eigen::Quaterniond> waypoints;
+        for (int i = 0; i <= numWaypoints; ++i) {
+            double t = double(i) / numWaypoints;
+            waypoints.push_back(start.slerp(t, end));
+        }
+        return waypoints;
 }
 
 // Function to generate waypoints along a Cubic Bezier curve and move to them
